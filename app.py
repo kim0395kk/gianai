@@ -121,7 +121,7 @@ def run_ai_corrections(text)
 
 
 # --- Streamlit UI 구성 ---
-st.title(✍️ AI 공무원 문서 검토 도우미 (Streamlit ver.))
+st.title(":writing_hand: AI 공무원 문서 검토 도우미 (Streamlit ver.))
 st.markdown(규칙 기반 검사와 AI의 지능형 교정으로 문서의 완성도를 높여보세요.)
 
 # 세션 상태 초기화
