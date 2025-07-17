@@ -5,11 +5,10 @@ import json
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(
-    page_title=AI 공무원 문서 검토 도우미,
-    page_icon=✍️,
-    layout=wide
+      page_title="AI 공무원 문서 검토 도우미",
+    page_icon=":writing_hand:", # ✍️ 이모지를 텍스트 코드로 변경
+    layout="wide"
 )
-
 # --- 규칙 기반 교정 로직 ---
 # 자바스크립트의 규칙을 파이썬 정규식으로 변환
 correction_rules = [
