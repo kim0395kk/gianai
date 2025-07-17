@@ -108,7 +108,7 @@ def run_ai_corrections(text)
         cleaned_json = raw_json.replace(```json, ).replace(```, ).strip()
         ai_result = json.loads(cleaned_json)
         
-        ai_changes = [{'description' f'{c['original']}' → '{c['corrected']}' ({c['reason']}), 'type' 'ai'} for c in ai_result.get('changes', [])]
+        ai_changes = [{'description' f'{c['original']}' -> '{c['corrected']}' ({c['reason']}), 'type' 'ai'} for c in ai_result.get('changes', [])]
         
         return ai_result.get('revised_text'), ai_changes
 
