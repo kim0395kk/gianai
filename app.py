@@ -9,7 +9,16 @@ st.set_page_config(
     page_icon=":writing_hand:",
     layout="wide"
 )
-
+# --- UI 숨김 처리 (CSS 추가) ---
+# Streamlit의 기본 헤더(GitHub 링크)와 푸터(Made with Streamlit)를 숨깁니다.
+hide_streamlit_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            header {visibility: hidden;}
+            footer {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 # --- 규칙 기반 교정 로직 (오류 수정을 위해 전체 재작성) ---
 correction_rules = [
     {'original': re.compile(r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일'), 'corrected': r'\1. \2. \3.', 'description': '날짜 형식 표준화'},
