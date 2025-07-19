@@ -5,7 +5,7 @@ import json
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(
-    page_title="AI 문서 교정 시스템",
+    page_title="GIAN AI 시스템",
     page_icon="✨",
     layout="wide"
 )
