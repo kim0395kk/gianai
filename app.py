@@ -5,174 +5,180 @@ import json
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(
-    page_title="AI 문서 검토 도우미",
+    page_title="AI 문서 교정 시스템",
     page_icon="✨",
     layout="wide"
 )
 
-# --- Apple 스타일 디자인 적용 (CSS) ---
-apple_style_css = """
+# --- Aurora Glass UI 디자인 적용 (CSS) ---
+aurora_glass_css = """
 <style>
-    /* 전체 폰트 및 배경색 설정 */
+    /* Aurora Background Animation */
+    @keyframes aurora {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+
+    /* 전체 폰트 및 배경 설정 */
     html, body, [class*="st-"] {
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
-        background-color: #000000;
-        color: #F5F5F7;
+    }
+
+    /* 메인 앱 컨테이너에 오로라 배경 적용 */
+    .stApp {
+        background: #111827; /* 다크 네이비 배경 */
+        background: linear-gradient(125deg, #111827 0%, #1F2937 40%, #374151 70%, #4B5563 100%);
+        background-size: 400% 400%;
+        animation: aurora 15s ease infinite;
+        color: #F9FAFB;
     }
 
     /* 메인 타이틀 */
     h1 {
-        font-size: 48px !important;
-        font-weight: 600 !important;
-        color: #F5F5F7;
+        font-size: 44px !important;
+        font-weight: 700 !important;
+        color: #FFFFFF;
         text-align: center;
         padding-top: 40px;
+        letter-spacing: -1px;
     }
 
     /* 서브 타이틀 */
     .subtitle {
-        font-size: 24px;
+        font-size: 20px;
         font-weight: 400;
-        color: #86868B;
+        color: #9CA3AF;
         text-align: center;
-        margin-bottom: 40px;
+        margin-bottom: 50px;
     }
 
     /* 섹션 헤더 (1. 원본, 2. 수정된) */
     h2 {
-        font-size: 28px !important;
+        font-size: 22px !important;
         font-weight: 600 !important;
-        color: #F5F5F7;
+        color: #E5E7EB;
         border: none !important;
-        padding-bottom: 20px !important;
+        padding-bottom: 15px !important;
     }
     
     h3 {
-        font-size: 24px !important;
+        font-size: 22px !important;
         font-weight: 600 !important;
-        color: #F5F5F7;
+        color: #E5E7EB;
         padding-top: 40px;
     }
 
+    /* Glassmorphism 효과를 위한 컨테이너 */
+    .glass-container {
+        background: rgba(31, 41, 55, 0.5); /* 반투명 배경 */
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border-radius: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 25px;
+    }
+
     /* 텍스트 입력창 및 결과창 스타일 */
-    .stTextArea textarea, .stCodeBlock, .result-container {
-        background-color: #1D1D1F;
-        border: 1px solid #424245;
+    .stTextArea textarea, .result-container {
+        background-color: rgba(17, 24, 39, 0.8);
+        border: 1px solid #4B5563;
         border-radius: 12px;
-        color: #F5F5F7;
+        color: #F9FAFB;
         font-size: 16px;
         padding: 15px;
         transition: border-color 0.3s, box-shadow 0.3s;
     }
-    .stTextArea textarea:focus, .stCodeBlock:focus-within {
-        border-color: #0071E3;
-        box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.25);
-    }
-    .stCodeBlock {
-        background-color: #1D1D1F !important;
+    .stTextArea textarea:focus {
+        border-color: #3B82F6;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25);
     }
     .result-container {
         height: 430px; 
         overflow-y: scroll;
+        line-height: 1.6;
     }
 
 
     /* 버튼 스타일 */
     .stButton>button {
         border: none;
-        border-radius: 980px; /* Pill shape */
-        padding: 12px 24px;
-        font-size: 17px;
+        border-radius: 12px;
+        padding: 14px 24px;
+        font-size: 16px;
         font-weight: 600;
-        transition: transform 0.2s, background-color 0.2s;
+        transition: all 0.2s ease-in-out;
+        width: 100%;
     }
     .stButton>button:hover {
-        transform: scale(1.03);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
     }
     .stButton>button:active {
-        transform: scale(0.98);
+        transform: translateY(0px);
     }
 
-    /* 1단계 버튼 (회색) */
+    /* 1단계 버튼 (유리 스타일) */
     div[data-testid="stButton"]:nth-of-type(1) > button {
-        background-color: #333336;
-        color: #F5F5F7;
+        background: rgba(255, 255, 255, 0.1);
+        color: #F9FAFB;
+        border: 1px solid rgba(255, 255, 255, 0.2);
     }
     div[data-testid="stButton"]:nth-of-type(1) > button:hover {
-        background-color: #424245;
+        background: rgba(255, 255, 255, 0.15);
     }
 
     /* 2단계 버튼 (파란색) */
     div[data-testid="stButton"]:nth-of-type(2) > button {
-        background-color: #0071E3;
+        background-color: #3B82F6;
         color: #FFFFFF;
     }
     div[data-testid="stButton"]:nth-of-type(2) > button:hover {
-        background-color: #0077ED;
+        background-color: #2563EB;
     }
     div[data-testid="stButton"]:nth-of-type(2) > button:disabled {
-        background-color: #1D1D1F;
-        color: #5A5A5E;
-        border: 1px solid #424245;
+        background-color: rgba(55, 65, 81, 0.5);
+        color: #9CA3AF;
+        cursor: not-allowed;
     }
 
     /* 변경사항 목록 스타일 */
     .change-card {
-        background-color: #1D1D1F;
-        border: 1px solid #424245;
+        background-color: rgba(17, 24, 39, 0.7);
+        border: 1px solid #4B5563;
         border-radius: 12px;
         padding: 15px;
         margin-bottom: 10px;
     }
-    .change-card-rule {
-        border-left: 4px solid #F5A623;
-    }
-    .change-card-ai {
-        border-left: 4px solid #0071E3;
-    }
-    .change-card .description {
-        font-weight: 600;
-        color: #F5F5F7;
-    }
+    .change-card-rule { border-left: 4px solid #FBBF24; }
+    .change-card-ai { border-left: 4px solid #3B82F6; }
+    .change-card .description { font-weight: 500; color: #E5E7EB; }
 
     /* Streamlit 기본 UI 숨기기 */
-    header, #MainMenu, footer {
-        visibility: hidden;
-    }
+    header, #MainMenu, footer { visibility: hidden; }
 </style>
 """
-st.markdown(apple_style_css, unsafe_allow_html=True)
+st.markdown(aurora_glass_css, unsafe_allow_html=True)
 
-# --- 교정 로직 함수들 ---
+# --- 교정 로직 함수들 (기능은 이전과 동일) ---
 
 def run_rule_based_corrections(text):
-    """규칙 기반으로 텍스트를 교정하고 변경사항을 반환합니다."""
-    # 행정안전부 표준 지침에 따라 규칙 대폭 강화
     correction_rules = [
-        # 날짜 및 시간
         {'original': re.compile(r'(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일'), 'corrected': r'\1. \2. \3.', 'description': '날짜 형식 표준화 (YYYY. MM. DD.)'},
         {'original': re.compile(r'(\d{1,2})\s*시\s*(\d{1,2})\s*분'), 'corrected': r'\1:\2', 'description': '시간 형식 표준화 (HH:MM)'},
-        
-        # 항목 번호 체계 (정규식 순서가 매우 중요)
-        {'original': re.compile(r'^\s*첫째\s*,', re.MULTILINE), 'corrected': '1. ', 'description': '항목 번호 체계: "첫째," -> "1."'},
-        {'original': re.compile(r'^\s*둘째\s*,', re.MULTILINE), 'corrected': '2. ', 'description': '항목 번호 체계: "둘째," -> "2."'},
-        {'original': re.compile(r'^\s*셋째\s*,', re.MULTILINE), 'corrected': '3. ', 'description': '항목 번호 체계: "셋째," -> "3."'},
+        {'original': re.compile(r'^\s*첫째, ?', re.MULTILINE), 'corrected': '1. ', 'description': '항목 번호 체계: "첫째," -> "1."'},
+        {'original': re.compile(r'^\s*둘째, ?', re.MULTILINE), 'corrected': '2. ', 'description': '항목 번호 체계: "둘째," -> "2."'},
+        {'original': re.compile(r'^\s*셋째, ?', re.MULTILINE), 'corrected': '3. ', 'description': '항목 번호 체계: "셋째," -> "3."'},
         {'original': re.compile(r'^\s*(\d+)\s*\)', re.MULTILINE), 'corrected': r'\1.', 'description': '항목 번호 체계: "1)" -> "1."'},
         {'original': re.compile(r'^\s*\(\s*([가-힣])\s*\)', re.MULTILINE), 'corrected': r'\1.', 'description': '항목 번호 체계: "(가)" -> "가."'},
         {'original': re.compile(r'^\s*([가-힣])\s*\)', re.MULTILINE), 'corrected': r'\1.', 'description': '항목 번호 체계: "가)" -> "가."'},
-        
-        # 붙임 및 끝 표시
         {'original': re.compile(r'^붙임\s*:'), 'corrected': '붙임  ', 'description': '"붙임:" -> "붙임  " (2칸 띄움)'},
-
-        # 일본식 및 권위적 표현
         {'original': re.compile(r'시건장치'), 'corrected': '잠금장치', 'description': '일본식 용어: "시건장치" -> "잠금장치"'},
         {'original': re.compile(r'금일'), 'corrected': '오늘', 'description': '일본식 한자어: "금일" -> "오늘"'},
         {'original': re.compile(r'명일'), 'corrected': '내일', 'description': '일본식 한자어: "명일" -> "내일"'},
         {'original': re.compile(r'익일'), 'corrected': '다음 날', 'description': '일본식 한자어: "익일" -> "다음 날"'},
         {'original': re.compile(r'요망합니다'), 'corrected': '하시기 바랍니다', 'description': '권위적 표현: "요망합니다" -> "하시기 바랍니다"'},
         {'original': re.compile(r'바랍니다\s*\.'), 'corrected': '바랍니다.', 'description': '권위적 표현: "바랍니다." -> "바랍니다."'},
-
-        # 띄어쓰기 및 문장 부호
         {'original': re.compile(r'\s+([.,?!%℃°])'), 'corrected': r'\1', 'description': '문장 부호 앞 불필요한 공백 제거'},
         {'original': re.compile(r'([.,?!])(?=[가-힣A-Za-z0-9])'), 'corrected': r'\1 ', 'description': '문장 부호 뒤 공백 추가'},
         {'original': re.compile(r'(제)\s*(\d+)\s*(조)'), 'corrected': r'\1\2\3', 'description': '법률 조항 붙여쓰기 (제 O 조 -> 제O조)'},
@@ -196,13 +202,11 @@ def run_rule_based_corrections(text):
     return corrected_text, changes
 
 def run_ai_corrections(text):
-    """Gemini API를 호출하여 AI 교정을 수행합니다."""
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         st.error("오류: Gemini API 키가 설정되지 않았습니다. 관리자에게 문의하세요.")
         return None, []
 
-    # 행정안전부 지침에 맞춰 프롬프트 고도화
     prompt = f"""
 당신은 대한민국 행정안전부 소속의 1급 공무원이자, 최고의 공문서 작성 및 검토 전문가입니다.
 당신의 임무는 아래 텍스트를 '행정업무운영 편람'에 명시된 대한민국 공문서 표준 지침에 따라 완벽하게 교정하는 것입니다.
@@ -265,19 +269,26 @@ if 'step' not in st.session_state:
     st.session_state.original_text_input = ""
 
 # 헤더
-st.markdown("<h1>AI 문서 검토 도우미</h1>", unsafe_allow_html=True)
-st.markdown("<p class='subtitle'>놀랍도록 쉽고 강력한 AI가 문서의 완성도를 높여줍니다.</p>", unsafe_allow_html=True)
+st.markdown("<h1>AI 문서 교정 시스템</h1>", unsafe_allow_html=True)
+st.markdown("<p class='subtitle'>행정안전부 표준 지침에 따라 AI가 기안문을 검토하고 교정합니다.</p>", unsafe_allow_html=True)
 
 
 col1, col2 = st.columns(2, gap="large")
 
 with col1:
+    st.markdown('<div class="glass-container">', unsafe_allow_html=True)
     st.subheader("1. 원본 입력")
-    st.text_area("이곳에 검토할 문서 내용을 붙여넣으세요.", height=400, key="original_text_input", label_visibility="collapsed")
+    st.text_area("이곳에 검토할 문서 내용을 붙여넣으세요.", height=350, key="original_text_input", label_visibility="collapsed")
     
     # 버튼 로직
-    rule_check_button = st.button("1단계: 기본 규칙 검사", use_container_width=True)
-    ai_check_button = st.button("2단계: AI로 다듬기", use_container_width=True, disabled=(st.session_state.step < 1))
+    b_col1, b_col2 = st.columns(2)
+    with b_col1:
+        rule_check_button = st.button("1단계: 기본 규칙 검사")
+    with b_col2:
+        ai_check_button = st.button("2단계: AI로 다듬기", disabled=(st.session_state.step < 1))
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
 
 if rule_check_button:
     if st.session_state.original_text_input:
@@ -303,14 +314,16 @@ if ai_check_button:
         st.warning("1단계 기본 규칙 검사를 먼저 실행해주세요.")
 
 with col2:
+    st.markdown('<div class="glass-container">', unsafe_allow_html=True)
     st.subheader("2. 수정된 내용")
     st.markdown(f'<div class="result-container">{st.session_state.corrected_text.replace(chr(10), "<br>")}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # 변경 사항 목록
 if st.session_state.all_changes:
     st.divider()
-    st.subheader("변경 사항")
+    st.subheader("주요 변경 사항")
     for change in st.session_state.all_changes:
         card_class = "change-card-rule" if change['type'] == 'rule' else "change-card-ai"
         st.markdown(f"""
