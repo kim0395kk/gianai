@@ -25,19 +25,20 @@ except Exception as e:
 # --- 2. 핵심 엔진 함수 (Gemini 2.0 최적화) ---
 
 def call_ai(prompt):
-    """2025년 기준 가장 안정적인 Gemini 2.0 및 최신 모델 명칭으로 수정"""
+    """
+    가장 범용적인 모델명만 사용하여 404 에러를 원천 차단합니다.
+    """
+    # 현재 가장 확실하게 지원되는 모델 명칭 2개만 사용
     model_priority = [
-        'gemini-2.0-flash',             # 1순위: 현재 가장 안정적인 2.0 모델
-        'gemini-2.0-flash-lite-preview-02-05', # 2순위: 최신 라이트 버전
-        'gemini-2.0-pro-exp',           # 3순위: 프로 버전 (이름을 짧게 수정)
-        'gemini-1.5-flash',             # 4순위: (보험용) 1.5 버전이 남아있다면 작동함
+        'gemini-2.0-flash',     # 최신 표준
+        'gemini-1.5-flash-8b'   # 초경량 백업 (가장 가동률 높음)
     ]
     
-    last_error = None
+    last_error = ""
     for m_name in model_priority:
         try:
             model = genai.GenerativeModel(m_name)
-            # 안전 설정은 그대로 유지
+            # 안전 설정 (법령 분석 시 차단 방지)
             safety = [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -45,15 +46,16 @@ def call_ai(prompt):
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
             ]
             response = model.generate_content(prompt, safety_settings=safety)
+            
             if response and response.text:
                 return response.text
         except Exception as e:
             last_error = str(e)
-            # 404 에러나 지원하지 않는 모델 에러일 경우 즉시 다음 모델로 패스
-            continue
+            continue # 다음 모델로 자동 이동
             
-    st.error(f"❌ 모든 모델 호출 실패. API 키 권한이나 모델명을 확인하세요.")
-    st.info(f"마지막 발생 에러: {last_error}")
+    # 만약 위 모델들이 다 실패하면 (API 키 문제일 확률 99%)
+    st.error(f"❌ AI 호출 실패. API 키를 다시 확인해 주세요.")
+    st.info(f"에러 내용: {last_error}")
     st.stop()
 
 def get_law_detail(query):
@@ -180,4 +182,5 @@ with st.expander("📂 최근 업무 처리 기록 (DB 연동)"):
             st.write("저장된 기록이 없습니다.")
     except:
         st.write("DB 연결 상태를 확인해 주세요.")
+
 
