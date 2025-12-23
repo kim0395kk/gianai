@@ -27,19 +27,39 @@ except Exception as e:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def call_ai(prompt):
-    """2025년 최신 모델 gemini-2.0-flash 사용"""
-    # 404 에러 방지를 위해 명칭 확인
-    model_name = 'gemini-2.0-flash'
-    try:
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        # 에러 발생 시 가용한 모델 목록을 출력하여 디버깅 도움
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        st.error(f"❌ 모델({model_name}) 호출 실패: {e}")
-        st.info(f"사용 가능 모델 목록: {available_models}")
-        st.stop()
+    """
+    429 에러(한도 초과) 발생 시 자동으로 다른 모델로 전환하여 시도합니다.
+    목록에 있는 최신 모델들을 우선순위대로 배치했습니다.
+    """
+    # 선생님의 목록에서 추출한 우선순위 리스트
+    model_priority = [
+        'gemini-2.5-flash',       # 2.5 버전 (안정적)
+        'gemini-3-flash-preview', # 최신 3 버전 (강력함)
+        'gemini-2.0-flash-lite',  # 가벼운 모델 (한도가 따로 계산됨)
+        'gemini-1.5-flash'        # 구관이 명관 (마지막 보루)
+    ]
+    
+    last_error = None
+    
+    for model_name in model_priority:
+        try:
+            # 모델 호출
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            last_error = e
+            # 429 에러(한도 초과)인 경우 다음 모델로 넘어감
+            if "429" in str(e):
+                continue
+            # 그 외 404 등 에러인 경우도 일단 다음 모델 시도
+            else:
+                continue
+                
+    # 모든 모델이 실패했을 경우
+    st.error(f"❌ 모든 모델의 할당량이 소진되었습니다. 잠시 후 다시 시도해 주세요.")
+    st.info(f"마지막 에러 내용: {last_error}")
+    st.stop()
 
 def get_law_detail(query):
     """법제처 API를 통해 실무 조문 수집"""
@@ -144,3 +164,4 @@ with st.expander("📂 나의 지난 업무 처리 기록 (DB 조회)"):
             st.write(f"**[{d['created_at'][:10]}]** {d['situation'][:60]}... (법령: {d['law_name']})")
     except:
         st.write("기록을 불러올 수 없습니다.")
+
