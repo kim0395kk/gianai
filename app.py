@@ -5,7 +5,6 @@ import google.generativeai as genai
 import json
 import re
 from supabase import create_client, Client
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 # --- 1. 설정 및 보안키 로드 ---
 st.set_page_config(layout="wide", page_title="행정업무 지능형 내비게이션")
@@ -23,48 +22,43 @@ except Exception as e:
     st.error(f"🚨 설정 오류: Secrets를 확인하세요. ({e})")
     st.stop()
 
-# --- 2. 핵심 엔진 함수 ---
+# --- 2. 핵심 엔진 함수 (Gemini 2.0 최적화) ---
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def call_ai(prompt):
-    """
-    429 에러(한도 초과) 발생 시 자동으로 다른 모델로 전환하여 시도합니다.
-    목록에 있는 최신 모델들을 우선순위대로 배치했습니다.
-    """
-    # 선생님의 목록에서 추출한 우선순위 리스트
+    """2025년 최신 Gemini 2.0 모델 스위칭 로직"""
+    # 1.5를 제외한 최신 2.0 라인업
     model_priority = [
-        'gemini-2.5-flash',       # 2.5 버전 (안정적)
-        'gemini-3-flash-preview', # 최신 3 버전 (강력함)
-        'gemini-2.0-flash-lite',  # 가벼운 모델 (한도가 따로 계산됨)
-        'gemini-1.5-flash'        # 구관이 명관 (마지막 보루)
+        'gemini-2.0-flash', 
+        'gemini-2.0-flash-lite', 
+        'gemini-2.0-pro-exp-02-05'
     ]
     
     last_error = None
-    
-    for model_name in model_priority:
+    for m_name in model_priority:
         try:
-            # 모델 호출
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
-            return response.text
+            model = genai.GenerativeModel(m_name)
+            # 안전 설정: 법령 용어로 인한 차단 방지
+            safety = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ]
+            response = model.generate_content(prompt, safety_settings=safety)
+            if response and response.text:
+                return response.text
         except Exception as e:
             last_error = e
-            # 429 에러(한도 초과)인 경우 다음 모델로 넘어감
-            if "429" in str(e):
-                continue
-            # 그 외 404 등 에러인 경우도 일단 다음 모델 시도
-            else:
-                continue
-                
-    # 모든 모델이 실패했을 경우
-    st.error(f"❌ 모든 모델의 할당량이 소진되었습니다. 잠시 후 다시 시도해 주세요.")
-    st.info(f"마지막 에러 내용: {last_error}")
+            continue
+            
+    st.error(f"❌ 모든 2.0 모델 호출 실패. 최종 에러: {last_error}")
     st.stop()
 
 def get_law_detail(query):
-    """법제처 API를 통해 실무 조문 수집"""
+    """법제처 API를 통해 실무 조문 수집 (검색 및 상세 정보 통합)"""
     search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={query}"
     try:
+        # 1. 법령 목록에서 MST(일련번호) 추출
         res = requests.get(search_url, timeout=10)
         root = ET.fromstring(res.content)
         law_node = root.find(".//law")
@@ -73,62 +67,74 @@ def get_law_detail(query):
         mst = law_node.find("법령일련번호").text
         name = law_node.find("법령명한글").text
         
+        # 2. 해당 MST로 상세 조문 50개 가져오기
         detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst}&type=XML"
-        detail_res = requests.get(detail_url, timeout=10)
+        detail_res = requests.get(detail_url, timeout=15)
         detail_root = ET.fromstring(detail_res.content)
         
-        articles = [f"제{a.find('조문번호').text}조: {a.find('조문내용').text}" 
-                    for a in detail_root.findall(".//조문")[:50]]
-        return {"name": name, "content": "\n".join(articles)}
-    except: return None
+        articles = []
+        for a in detail_root.findall(".//조문"):
+            num = a.find('조문번호').text if a.find('조문번호') is not None else ""
+            cont = a.find('조문내용').text if a.find('조문내용') is not None else ""
+            if cont:
+                articles.append(f"제{num}조: {cont.strip()}")
+        
+        return {"name": name, "content": "\n".join(articles[:50])}
+    except Exception as e:
+        return None
 
 # --- 3. 메인 UI ---
 
 st.title("⚖️ 공무원 업무 지능형 내비게이션")
-st.markdown("##### 상황을 입력하면 법령을 분석하고 실무 가이드를 생성하여 DB에 저장합니다.")
+st.info("💡 본 시스템은 최신 Gemini 2.0 AI와 대한민국 법령 데이터를 실시간 연동합니다.")
 
-user_input = st.text_area("현 업무 상황 또는 민원 내용을 입력하세요", height=120, placeholder="예: 무단 점유된 공유재산에 대한 변상금 부과 절차와 근거 법령")
+user_input = st.text_area("현 업무 상황 또는 민원 내용을 입력하세요", height=150, 
+                          placeholder="예: 초등학교 정문 앞 무인 단속 카메라 설치 반대 민원에 대한 대응 근거")
 
-if st.button("🚀 실무 리포트 생성", type="primary"):
+if st.button("🚀 실무 리포트 생성 및 DB 저장", type="primary"):
     if not user_input:
         st.warning("상황을 입력해 주세요.")
     else:
-        with st.status("🔍 분석 및 데이터 저장 중...", expanded=True) as status:
-            # 1. 법령 식별
-            status.write("1. 관련 법령 탐색...")
-            law_name_res = call_ai(f"질문: {user_input}\n가장 적합한 대한민국 법령명 1개만 써줘.").strip().replace("*","")
+        with st.status("🔍 법령 분석 중...", expanded=True) as status:
+            # Step 1: 관련 법령명 식별
+            status.write("1. 관련 법령 탐색 중...")
+            id_prompt = f"상황: {user_input}\n위 상황에 적용할 수 있는 가장 핵심적인 대한민국 법령 명칭 '하나'만 딱 이름만 출력해. 다른 말은 절대 하지마."
+            raw_name = call_ai(id_prompt)
+            law_name_cleaned = re.sub(r'[^가-힣0-9]', '', raw_name).strip() # 한글/숫자만 남김
             
-            # 2. 법령 수집
-            status.write(f"2. {law_name_res} 조문 수집 중...")
-            law_info = get_law_detail(law_name_res)
+            # Step 2: 법령 조문 수집
+            status.write(f"2. {law_name_cleaned} 조문 수집 중...")
+            law_info = get_law_detail(law_name_cleaned)
             
             if not law_info:
-                st.error("법령 데이터를 가져오지 못했습니다."); st.stop()
+                st.error(f"'{law_name_cleaned}' 데이터를 가져오지 못했습니다. 법령명을 구체적으로 입력해 보세요."); st.stop()
             
-            # 3. 가이드 생성
-            status.write("3. 공무원 맞춤형 실무 지침 작성...")
-            prompt = f"""
+            # Step 3: 가이드 생성 (JSON 포맷 강제)
+            status.write("3. 수석 사무관 AI의 가이드라인 작성...")
+            guide_prompt = f"""
             상황: {user_input}
-            법령 내용: {law_info['content']}
-            너는 수석 사무관이야. 후배를 위해 아래 JSON 형식으로 답해:
+            참조법령: {law_info['content']}
+            
+            너는 대한민국 최고의 수석 사무관이야. 후배를 위해 아래 JSON 형식으로만 답변해.
             {{
-                "summary": "법리적 요약 3줄",
+                "summary": "법리적 요약 (3줄 이내)",
                 "steps": [
-                    {{"title": "근거 확인", "desc": "내용"}},
-                    {{"title": "실무 절차", "desc": "내용"}},
-                    {{"title": "민원 대응", "desc": "내용"}}
+                    {{"title": "단계별 대응 1", "desc": "상세 내용"}},
+                    {{"title": "단계별 대응 2", "desc": "상세 내용"}},
+                    {{"title": "단계별 대응 3", "desc": "상세 내용"}}
                 ],
-                "tip": "감사 주의사항 및 꿀팁"
+                "tip": "감사 대비 및 민원 응대 꿀팁"
             }}
             """
-            result_raw = call_ai(prompt)
+            guide_raw = call_ai(guide_prompt)
             
+            # JSON 추출 및 파싱
             try:
-                json_match = re.search(r'\{.*\}', result_raw, re.DOTALL)
-                report = json.loads(json_match.group())
+                json_str = re.search(r'\{.*\}', guide_raw, re.DOTALL).group()
+                report = json.loads(json_str)
                 
-                # 4. Supabase 저장
-                status.write("4. 업무 지식 베이스(DB) 저장 중...")
+                # Step 4: Supabase 저장
+                status.write("4. 지식 베이스(DB) 저장...")
                 supabase.table("law_reports").insert({
                     "situation": user_input,
                     "law_name": law_info['name'],
@@ -137,31 +143,38 @@ if st.button("🚀 실무 리포트 생성", type="primary"):
                     "tip": report['tip']
                 }).execute()
                 
-                status.update(label="✅ 가이드 생성 및 저장 완료!", state="complete")
+                status.update(label="✅ 분석 및 저장 완료!", state="complete")
                 
-                # 결과 출력
+                # --- 결과 출력 UI ---
                 st.divider()
-                col1, col2 = st.columns([6, 4])
-                with col1:
+                res_col1, res_col2 = st.columns([7, 3])
+                
+                with res_col1:
                     st.subheader("📋 실무 가이드라인")
-                    st.success(report['summary'])
+                    st.success(f"**[요약]** {report['summary']}")
                     for s in report['steps']:
-                        st.markdown(f"**📍 {s['title']}**: {s['desc']}")
+                        with st.expander(f"📍 {s['title']}", expanded=True):
+                            st.write(s['desc'])
                     st.warning(f"💡 **베테랑 팁**: {report['tip']}")
-                with col2:
-                    st.subheader(f"📜 관련 법령: {law_info['name']}")
+                
+                with res_col2:
+                    st.subheader("📜 근거 법령")
+                    st.caption(law_info['name'])
                     st.code(law_info['content'], language="text")
                     
             except Exception as e:
-                st.error(f"결과 파싱 중 오류 발생: {e}")
+                st.error(f"데이터 처리 중 오류 발생: {e}")
+                st.expander("AI 응답 원문 보기").write(guide_raw)
 
-# --- 4. 업무 기록 조회 (하단) ---
+# --- 4. 하단 기록 조회 ---
 st.divider()
-with st.expander("📂 나의 지난 업무 처리 기록 (DB 조회)"):
+with st.expander("📂 최근 업무 처리 기록 (DB 연동)"):
     try:
-        data = supabase.table("law_reports").select("*").order("created_at", desc=True).limit(5).execute()
-        for d in data.data:
-            st.write(f"**[{d['created_at'][:10]}]** {d['situation'][:60]}... (법령: {d['law_name']})")
+        history = supabase.table("law_reports").select("*").order("created_at", desc=True).limit(5).execute()
+        if history.data:
+            for item in history.data:
+                st.write(f"- **[{item['created_at'][:10]}]** {item['law_name']} | {item['situation'][:40]}...")
+        else:
+            st.write("저장된 기록이 없습니다.")
     except:
-        st.write("기록을 불러올 수 없습니다.")
-
+        st.write("DB 연결 상태를 확인해 주세요.")
