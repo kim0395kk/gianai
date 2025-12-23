@@ -25,11 +25,15 @@ except Exception as e:
 
 # --- 모델 호출 (gemini-1.5-flash 고정) ---
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+# [임시 디버깅용 함수] - 이 코드로 바꿔서 실행하면 진짜 에러가 화면에 뜹니다.
 def call_ai(prompt):
-    # 404 에러 방지를 위해 확실한 모델명 사용
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    response = model.generate_content(prompt)
-    return response.text
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash') # 모델명 확인!
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        st.error(f"❌ AI 호출 중 진짜 에러 발생: {e}") # 여기서 구체적인 이유가 나옵니다.
+        st.stop()
 
 # --- 법령 검색 ---
 def fetch_law(query):
@@ -103,3 +107,4 @@ if st.button("🚀 가이드 생성", type="primary"):
             for s in report['steps']:
                 st.info(f"**{s['step']}**: {s['desc']}")
             st.warning(f"💡 팁: {report['tip']}")
+
