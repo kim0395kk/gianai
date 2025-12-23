@@ -25,19 +25,19 @@ except Exception as e:
 # --- 2. 핵심 엔진 함수 (Gemini 2.0 최적화) ---
 
 def call_ai(prompt):
-    """2025년 최신 Gemini 2.0 모델 스위칭 로직"""
-    # 1.5를 제외한 최신 2.0 라인업
+    """2025년 기준 가장 안정적인 Gemini 2.0 및 최신 모델 명칭으로 수정"""
     model_priority = [
-        'gemini-2.0-flash', 
-        'gemini-2.0-flash-lite', 
-        'gemini-2.0-pro-exp-02-05'
+        'gemini-2.0-flash',             # 1순위: 현재 가장 안정적인 2.0 모델
+        'gemini-2.0-flash-lite-preview-02-05', # 2순위: 최신 라이트 버전
+        'gemini-2.0-pro-exp',           # 3순위: 프로 버전 (이름을 짧게 수정)
+        'gemini-1.5-flash',             # 4순위: (보험용) 1.5 버전이 남아있다면 작동함
     ]
     
     last_error = None
     for m_name in model_priority:
         try:
             model = genai.GenerativeModel(m_name)
-            # 안전 설정: 법령 용어로 인한 차단 방지
+            # 안전 설정은 그대로 유지
             safety = [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -48,10 +48,12 @@ def call_ai(prompt):
             if response and response.text:
                 return response.text
         except Exception as e:
-            last_error = e
+            last_error = str(e)
+            # 404 에러나 지원하지 않는 모델 에러일 경우 즉시 다음 모델로 패스
             continue
             
-    st.error(f"❌ 모든 2.0 모델 호출 실패. 최종 에러: {last_error}")
+    st.error(f"❌ 모든 모델 호출 실패. API 키 권한이나 모델명을 확인하세요.")
+    st.info(f"마지막 발생 에러: {last_error}")
     st.stop()
 
 def get_law_detail(query):
@@ -178,3 +180,4 @@ with st.expander("📂 최근 업무 처리 기록 (DB 연동)"):
             st.write("저장된 기록이 없습니다.")
     except:
         st.write("DB 연결 상태를 확인해 주세요.")
+
