@@ -3,72 +3,61 @@ import requests
 import xml.etree.ElementTree as ET
 import google.generativeai as genai
 import json
-import time
 import re
 
-# --- 1. 설정 및 API 키 확인 ---
-st.set_page_config(layout="wide", page_title="공무원 AI 법률 어시스턴트")
+# --- 1. 화면 설정 (와이드 모드 및 커스텀 스타일) ---
+st.set_page_config(layout="wide", page_title="공무원 법령 분석 시스템", page_icon="⚖️")
 
+st.markdown("""
+    <style>
+    /* 박스 공통 스타일 */
+    .report-box {
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #d1d5db;
+        background-color: #ffffff;
+        font-size: 0.95rem;
+        line-height: 1.6;
+    }
+    /* 법령 칸 전용 스타일 (스크롤 가능 및 높이 고정) */
+    .law-box {
+        height: 500px;
+        overflow-y: auto;
+        background-color: #fff9e6;
+        border-left: 5px solid #f59e0b;
+    }
+    h3 { color: #111827; border-bottom: 2px solid #374151; padding-bottom: 8px; margin-bottom: 15px; }
+    .stButton>button { width: 100%; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# API 설정
 try:
     GEMINI_API_KEY = st.secrets["general"]["GEMINI_API_KEY"]
     LAW_API_ID = st.secrets["general"]["LAW_API_ID"]
     genai.configure(api_key=GEMINI_API_KEY)
-except Exception as e:
-    st.error("🚨 Secrets 설정(API 키)을 확인해주세요.")
+except:
+    st.error("🚨 Secrets 설정을 확인해주세요 (GEMINI_API_KEY, LAW_API_ID).")
     st.stop()
 
-# --- 2. [핵심] 사용 가능한 모델 자동 감지 함수 ---
+# --- 2. 핵심 로직 함수 ---
 
 def get_working_model():
-    """현재 API 키로 사용 가능한 모델 중 가장 적합한 것을 자동 선택"""
+    """사용 가능한 Gemini 모델 자동 감지"""
     try:
         for m in genai.list_models():
-            # generateContent를 지원하고, 이름에 'flash' 또는 'pro'가 포함된 모델 탐색
             if 'generateContent' in m.supported_generation_methods:
-                if 'gemini-1.5-flash' in m.name or 'gemini-1.5-pro' in m.name:
-                    return m.name
-        # 위 조건에 맞는게 없으면 첫 번째 모델이라도 반환
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        return models[0] if models else None
-    except Exception:
-        return None
+                if 'gemini-1.5-flash' in m.name: return m.name
+        return "models/gemini-1.5-flash"
+    except: return "models/gemini-1.5-flash"
 
-# --- 3. AI 모델 호출 함수 ---
-
-def ask_gemini(prompt):
-    model_name = get_working_model()
-    if not model_name:
-        st.error("❌ 현재 API 키로 사용할 수 있는 Gemini 모델이 없습니다. API 키 상태를 확인하세요.")
-        return None
-    
+def fetch_law_data(law_name):
+    """국가법령정보센터 API 데이터 수집"""
+    search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={law_name}"
     try:
-        # 감지된 모델 이름(예: models/gemini-1.5-flash)으로 호출
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        st.error(f"AI 호출 오류 ({model_name}): {e}")
-        return None
-
-# --- 4. 법령 데이터 관련 함수 ---
-
-def get_target_law_name(user_query):
-    prompt = f"질문: '{user_query}'\n관련 대한민국 법령명 1개만 출력해. (예: 민방위기본법). 다른 말 절대 금지."
-    res_text = ask_gemini(prompt)
-    if res_text:
-        return res_text.strip().replace(" ", "").replace("`", "")
-    return None
-
-def fetch_law_full_text(law_name):
-    """국가법령정보센터 API 연동"""
-    search_url = "https://www.law.go.kr/DRF/lawSearch.do"
-    params = {"OC": LAW_API_ID, "target": "law", "type": "XML", "query": law_name}
-    try:
-        res = requests.get(search_url, params=params, timeout=10)
-        # 신청 단계 체크 (544.jpg 참조)
-        if "인증" in res.text or "승인" in res.text:
-            return "NOT_APPROVED"
-            
+        res = requests.get(search_url, timeout=10)
+        if "인증" in res.text or "승인" in res.text: return "NOT_APPROVED"
+        
         root = ET.fromstring(res.content)
         law_node = root.find(".//law")
         if law_node is None: return None
@@ -76,61 +65,95 @@ def fetch_law_full_text(law_name):
         mst_id = law_node.find("법령일련번호").text
         real_name = law_node.find("법령명한글").text
         
-        detail_url = "https://www.law.go.kr/DRF/lawService.do"
-        detail_params = {"OC": LAW_API_ID, "target": "law", "MST": mst_id, "type": "XML"}
-        detail_res = requests.get(detail_url, params=detail_params, timeout=15)
+        detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst_id}&type=XML"
+        detail_res = requests.get(detail_url, timeout=15)
         detail_root = ET.fromstring(detail_res.content)
         
-        full_text_list = []
-        articles = detail_root.findall(".//조문")[:30] # 속도를 위해 30개로 압축
-        for article in articles:
-            article_no = article.find("조문번호").text if article.find("조문번호") is not None else ""
-            article_content = article.find("조문내용").text if article.find("조문내용") is not None else ""
-            full_text_list.append(f"제{article_no}조: {article_content}")
+        full_text = []
+        # 조문 내용을 더 많이 가져오도록 제한을 80개로 확대
+        for article in detail_root.findall(".//조문")[:80]:
+            no = article.find("조문번호").text if article.find("조문번호") is not None else ""
+            title = article.find("조문제목").text if article.find("조문제목") is not None else ""
+            content = article.find("조문내용").text if article.find("조문내용") is not None else ""
+            full_text.append(f"제{no}조({title}): {content}")
             
-        return {"name": real_name, "text": "\n".join(full_text_list)}
-    except:
-        return None
+        return {"name": real_name, "text": "\n".join(full_text)}
+    except: return None
 
-# --- 5. 메인 UI ---
+# --- 3. UI 메인 ---
 
-st.title("⚖️ 법령 실시간 분석기 (자동 모델링)")
-query = st.text_input("질문을 입력하세요.")
+st.title("⚖️ 법령 정밀 분석 보고서")
+st.write("민원 상황에 따라 관련 법령을 대조하고 대응 절차를 생성합니다.")
 
-if st.button("🚀 분석 시작"):
+query = st.text_input("분석할 상황 입력", placeholder="예: 민방위 교육 불참 과태료 부과 절차와 이의신청 방법")
+
+if st.button("🚀 실시간 분석 시작"):
     if not query:
-        st.warning("질문을 입력해주세요.")
+        st.warning("내용을 입력해주세요.")
     else:
-        with st.status("📡 시스템 가동 중...", expanded=True) as status:
-            # 1단계
-            st.write("🔍 **1단계: 사용 가능한 AI 모델 감지 및 법령 탐색...**")
-            target_law = get_target_law_name(query)
+        with st.status("📡 법령 데이터를 정밀 분석하고 있습니다...", expanded=True) as status:
             
-            if target_law:
-                st.write(f"✅ 법령 식별 완료: **{target_law}**")
-            else:
-                status.update(label="에러: 모델 연결 실패", state="error")
-                st.stop()
-
-            # 2단계
-            st.write("🌐 **2단계: 국가법령정보센터 데이터 호출...**")
-            law_data = fetch_law_full_text(target_law)
+            # 1. 법령명 식별
+            model_name = get_working_model()
+            model = genai.GenerativeModel(model_name)
+            target_law_res = model.generate_content(f"'{query}'와 가장 관련있는 대한민국 법령명 1개만 써줘. 예: 민방위기본법")
+            target_law = target_law_res.text.strip().replace(" ", "")
+            
+            st.write(f"✅ 관련 법령 식별: **{target_law}**")
+            
+            # 2. 법령 수집
+            law_data = fetch_law_data(target_law)
             
             if law_data == "NOT_APPROVED":
-                st.error("❌ API가 아직 **'신청'** 단계입니다. 승인이 필요합니다.")
+                st.error("❌ 국가법령 API 승인이 필요합니다. (544.jpg 참조)")
                 status.update(label="API 미승인", state="error")
                 st.stop()
             elif not law_data:
-                st.error("❌ 데이터를 가져오지 못했습니다.")
-                status.update(label="수집 실패", state="error")
+                st.error("❌ 법령 데이터를 가져오지 못했습니다.")
                 st.stop()
 
-            # 3단계
-            st.write("🧠 **3단계: 조문 대조 분석 중...**")
-            prompt = f"질문: {query}\n법령내용: {law_data['text']}\n위 내용을 바탕으로 답변해."
-            analysis = ask_gemini(prompt)
+            # 3. AI 분석 (상세 법령 추출 강조)
+            prompt = f"""
+            질문: {query}
+            법령 전문: {law_data['text']}
+
+            위 내용을 바탕으로 아래 JSON 형식으로만 답변하세요. 
+            내용이 많더라도 법령 근거를 상세히 포함하세요.
+            {{
+                "situation": "민원인의 상황 핵심 요약",
+                "response": "공무원 입장에서의 단계별 대응 절차 및 가이드",
+                "law_detail": "관련된 모든 법조항의 번호와 구체적인 내용을 상세히 기술"
+            }}
+            """
+            response = model.generate_content(prompt)
+            json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
             
-            if analysis:
+            if json_match:
+                result = json.loads(json_match.group())
                 status.update(label="🏆 분석 완료!", state="complete")
                 st.divider()
-                st.markdown(analysis)
+
+                # --- 4. 비율 조정 레이아웃 [2:3:5 비율] ---
+                col1, col2, col3 = st.columns([2, 3, 5])
+
+                with col1:
+                    st.markdown("### 🔍 상황 요약")
+                    st.markdown(f"<div class='report-box'>{result['situation']}</div>", unsafe_allow_html=True)
+
+                with col2:
+                    st.markdown("### ✅ 대응 절차")
+                    st.markdown(f"<div class='report-box' style='background-color: #f0fdf4;'>{result['response']}</div>", unsafe_allow_html=True)
+
+                with col3:
+                    st.markdown(f"### 📜 관련 법령: {law_data['name']}")
+                    # 법령 칸에 스크롤 박스 적용
+                    st.markdown(f"""
+                        <div class='report-box law-box'>
+                            {result['law_detail'].replace('\\n', '<br>')}
+                            <hr>
+                            <b>[참고: 수집된 법령 원문 요약]</b><br>
+                            {law_data['text'][:2000].replace('\\n', '<br>')}...
+                        </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.error("AI 분석 형식이 올바르지 않습니다. 다시 시도해주세요.")
