@@ -1,5 +1,5 @@
 streamlit
-google-generativeai>=0.8.0
-supabase
+google-generativeai>=0.8.3
 requests
-tenacity
+google-search-results  <-- (이게 새로 추가된 핵심입니다!)
+supabase
