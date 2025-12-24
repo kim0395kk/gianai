@@ -47,11 +47,30 @@ except Exception as e:
     st.error(f"🚨 API 키 설정 오류: {e}")
     st.stop()
 
+# [핵심 수정] 사용 가능한 모델을 자동으로 찾는 함수 (404 에러 방지)
 @st.cache_data
-def get_model():
-    return 'models/gemini-1.5-flash'
+def get_best_model():
+    try:
+        # 내 API 키로 사용 가능한 모델 리스트 조회
+        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # 우선순위: Flash -> Pro -> 1.0 Pro
+        priorities = [
+            'models/gemini-1.5-flash',
+            'models/gemini-1.5-flash-latest',
+            'models/gemini-1.5-pro',
+            'models/gemini-pro'
+        ]
+        
+        for p in priorities:
+            if p in available_models: return p
+            
+        # 우선순위 모델이 없으면 아무거나 가능한 것 반환
+        return available_models[0] if available_models else 'models/gemini-pro'
+    except:
+        return 'models/gemini-pro' # 최후의 수단
 
-MODEL_NAME = get_model()
+MODEL_NAME = get_best_model()
 
 # --- 2. 로직 엔진 ---
 
@@ -75,7 +94,7 @@ def get_law_context(situation, callback):
         detail_root = ET.fromstring(requests.get(detail_url, timeout=5).content)
         
         articles = []
-        # [안전장치] 딱 10개만 가져옵니다. (토큰 절약 최우선)
+        # [안전장치] 딱 10개만 가져옵니다.
         for a in detail_root.findall(".//조문")[:10]: 
             num = a.find('조문번호').text or ""
             cont = a.find('조문내용').text or ""
@@ -90,7 +109,6 @@ def get_search_results(situation, callback):
     """[엔진 2] 구글 서치"""
     callback(60, "🔍 사례 검색 중...")
     try:
-        # 검색 결과 3개로 제한
         params = {"engine": "google", "q": f"{situation} 행정처분 사례", "api_key": SERPAPI_KEY, "num": 3}
         search = GoogleSearch(params)
         results = search.get_dict().get("organic_results", [])
@@ -103,7 +121,7 @@ def generate_report_safe(situation, law_name, law_text, search_text, callback):
     """[엔진 3] 과부하 방지 스마트 로직"""
     model = genai.GenerativeModel(MODEL_NAME)
     
-    # [핵심] 입력 데이터가 너무 길면 Python에서 미리 자릅니다. (API 요청 전 다이어트)
+    # [핵심] 입력 데이터가 너무 길면 Python에서 미리 자릅니다.
     if len(law_text) > 3000:
         law_text = law_text[:3000] + "...(생략)"
     
@@ -142,10 +160,9 @@ def generate_report_safe(situation, law_name, law_text, search_text, callback):
         callback(100, "🎉 분석 완료!")
         return res.text
     except Exception as e:
-        print(f"1차 실패: {e}") # 로그 확인용
+        print(f"1차 실패: {e}") 
 
     # 2차 시도 (실패 시 충분히 쉬고 가벼운 요청으로)
-    # 여기서 바로 재요청하면 100% 또 죽습니다. 5초간 쉽니다.
     for i in range(5, 0, -1):
         callback(85, f"⚠️ 트래픽 조절 중... {i}초 대기")
         time.sleep(1)
@@ -160,10 +177,10 @@ def generate_report_safe(situation, law_name, law_text, search_text, callback):
 
 # --- 3. UI 실행 ---
 
-st.markdown("""
+st.markdown(f"""
 <div style="text-align:center; padding: 20px; background: rgba(255,255,255,0.6); border-radius: 20px; border: 1px solid rgba(255,255,255,0.4);">
-    <h1 style="color:#1a237e;">⚖️ AI 행정관: Safe Mode</h1>
-    <span class="status-badge">Traffic Control System On</span>
+    <h1 style="color:#1a237e;">⚖️ AI 행정관: The Legal Glass</h1>
+    <span class="status-badge">Auto-Detect Model: {MODEL_NAME}</span>
 </div>
 <br>
 """, unsafe_allow_html=True)
@@ -182,15 +199,15 @@ if btn and user_input:
         status_text.caption(f"{t}")
         time.sleep(0.05)
 
-    # 1. 법령 (10개 제한)
+    # 1. 법령
     law_name, law_text = get_law_context(user_input, update)
-    time.sleep(1) # API 사이 휴식
+    time.sleep(1) 
     
     # 2. 검색
     search_text = get_search_results(user_input, update)
-    time.sleep(1) # API 사이 휴식
+    time.sleep(1) 
     
-    # 3. 분석 (실패 시 5초 대기 후 경량화 재시도)
+    # 3. 분석
     final_text = generate_report_safe(user_input, law_name, law_text, search_text, update)
     
     progress_bar.empty()
