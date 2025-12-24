@@ -66,65 +66,88 @@ CURRENT_MODEL_NAME = get_best_available_model()
 
 @st.cache_data(ttl=3600)
 def search_law_name(situation):
-    """[AI 1단계] 법령명 추론"""
-    if not CURRENT_MODEL_NAME:
-        return "모델 연결 실패"
-        
-    model = genai.GenerativeModel(CURRENT_MODEL_NAME)
-    prompt = f"상황: {situation}\n위 상황에 적용되는 가장 핵심적인 법령 이름 하나만 정확한 한국어 명칭으로 출력해. (예: 도로교통법)"
+    """[AI 1단계] 법령명 추론 (프롬프트 강화 버전)"""
+    if not CURRENT_MODEL: return "모델 오류"
+    model = genai.GenerativeModel(CURRENT_MODEL)
+    
+    # 변경점: '도로' 같은 단답형 말고 '도로교통법' 같은 풀네임을 요구
+    prompt = f"""
+    상황: {situation}
+    
+    위 상황을 해결하기 위해 참고해야 할 대한민국 현행 법령의 '정식 명칭' 1개만 출력해.
+    약칭이나 단순 명사가 아니라 반드시 '법'으로 끝나는 전체 이름을 써야 해.
+    (나쁜 예: 도로, 교통, 주차 / 좋은 예: 도로교통법, 주차장법, 건축법)
+    """
     
     try:
         response = model.generate_content(
             prompt,
-            generation_config={"max_output_tokens": 20, "temperature": 0.0}
+            generation_config={"max_output_tokens": 30, "temperature": 0.0}
         )
         return response.text.strip()
     except Exception as e:
         return f"에러: {str(e)}"
-
+        
 def fetch_and_filter_articles(law_name, situation_keywords):
-    """[Python 로직] 조문 필터링 (토큰 비용 0원)"""
+    """[Python 로직] 조문 필터링 (안전장치 추가)"""
     # 1. 법령 검색
-    search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={law_name}"
     try:
+        # 검색 정확도를 높이기 위해 정확한 명칭으로 요청
+        search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={law_name}"
         res = requests.get(search_url, timeout=5)
         root = ET.fromstring(res.content)
+        
+        # 검색 결과가 여러 개일 경우, 첫 번째 결과가 가장 정확할 확률이 높음
         law_node = root.find(".//law")
         if law_node is None: return None, None
         
         mst = law_node.find("법령일련번호").text
         full_name = law_node.find("법령명한글").text
-    except: return None, None
+    except Exception as e:
+        print(f"법령 검색 실패: {e}")
+        return None, None
 
     # 2. 조문 가져오기
-    detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst}&type=XML"
     try:
+        detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst}&type=XML"
         res = requests.get(detail_url, timeout=10)
         root = ET.fromstring(res.content)
         
-        # 3. 키워드 매칭
-        keywords = set(situation_keywords.replace(" ", ",").split(",")) 
-        scored_articles = []
+        keywords = set(situation_keywords.replace(" ", ",").split(","))
+        scored = []
         
+        # 모든 조문 순회
+        all_articles = [] # 점수가 없어도 일단 담아둘 리스트
         for a in root.findall(".//조문"):
-            num = a.find('조문번호').text or ""
             cont = a.find('조문내용').text or ""
+            num = a.find('조문번호').text or ""
             
-            score = 0
-            for k in keywords:
-                if len(k) > 1 and k in cont:
-                    score += 1
+            # 전체 리스트에 저장 (형식: 제N조 내용)
+            article_text = f"제{num}조: {cont}"
+            all_articles.append(article_text)
             
-            # 점수가 있거나 중요 단어 포함 시
-            if score > 0 or any(x in cont for x in ["금지", "위반", "처분", "과태료"]): 
-                scored_articles.append((score, f"제{num}조: {cont}"))
+            # 점수 계산
+            score = sum(1 for k in keywords if len(k) > 1 and k in cont)
+            if score > 0:
+                scored.append((score, article_text))
         
-        scored_articles.sort(key=lambda x: x[0], reverse=True)
-        final_context = "\n".join([item[1] for item in scored_articles[:5]])
+        # [수정된 로직]
+        # 1순위: 키워드가 매칭된 조문이 있으면 그걸 쓴다.
+        if scored:
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return full_name, "\n".join([x[1] for x in scored[:5]])
         
-        return full_name, final_context
-    except: return None, None
-
+        # 2순위 (Fallback): 키워드 매칭이 하나도 안 됐으면, 그냥 앞부분 5개 조문이라도 보낸다.
+        # (AI가 '도로'라고 잘못 찾았어도, 내용은 보여주기 위함)
+        elif all_articles:
+            return full_name, "\n".join(all_articles[:5])
+            
+        else:
+            return None, None
+            
+    except Exception as e:
+        print(f"조문 추출 실패: {e}")
+        return None, None
 def generate_report(situation, law_name, context):
     """[AI 2단계] 리포트 생성"""
     if not context or not CURRENT_MODEL_NAME: return None
@@ -225,3 +248,4 @@ if st.button("분석 실행", type="primary"):
                     st.error("리포트 생성에 실패했습니다.")
             else:
                 st.error(f"'{clean_law_name}' 데이터를 찾을 수 없습니다. 질문을 구체적으로 수정해보세요.")
+
