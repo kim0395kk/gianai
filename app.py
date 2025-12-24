@@ -55,23 +55,32 @@ CURRENT_MODEL = get_best_model()
 # --- 3. 핵심 로직 함수들 ---
 
 @st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)
 def infer_law_name(situation, model_name):
     """
-    [토큰 다이어트 1단계] 상황을 분석해 '정확한 법령명' 하나만 가져옵니다.
+    [업데이트] 상황이 복합적일 때 특정 특별법(예: 건설기계관리법)을 우선하도록 프롬프트 강화
     """
     if not model_name: return "모델 연결 실패"
     model = genai.GenerativeModel(model_name)
     
     prompt = f"""
     상황: {situation}
-    위 상황을 해결하기 위한 대한민국 현행 법령의 '정식 명칭' 1개만 출력해.
-    설명 없이 딱 법 이름만 적어. (예: 도로교통법, 자동차관리법, 주차장법)
+    
+    위 상황을 규제하거나 처분할 수 있는 가장 직접적인 '대한민국 법령명' 1개만 정확히 출력해.
+    
+    [중요 원칙]
+    1. '아파트'와 '차량/기계'가 같이 나오면 주택법보다 '도로교통법'이나 '자동차관리법', '건설기계관리법'을 우선할 것.
+    2. '건설기계'(덤프, 굴착기 등)가 언급되면 무조건 '건설기계관리법'을 출력할 것.
+    3. 설명 없이 법 이름만 딱 적어. (예: 건설기계관리법)
     """
     try:
         res = model.generate_content(prompt, generation_config={"max_output_tokens": 20, "temperature": 0.0})
         return res.text.strip()
-    except: return "검색 실패"
-
+    except: 
+        # API 호출 실패 시, 상황에 '건설기계'가 있으면 하드코딩으로 리턴 (Fallback)
+        if "건설기계" in situation:
+            return "건설기계관리법"
+        return "검색 실패"
 def get_law_link(law_name, article_num):
     """법제처 해당 조문으로 가는 직링크 생성"""
     # URL 인코딩 (한글 처리)
@@ -265,3 +274,4 @@ if analyze_btn and user_input:
             }).execute()
         except Exception:
             pass # DB 에러는 사용자에게 안 보이게 처리
+
