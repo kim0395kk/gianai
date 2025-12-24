@@ -7,76 +7,95 @@ import re
 import time
 from supabase import create_client
 
-# --- 0. 디자인 시스템 설정 (CSS Injection) ---
+# --- 0. 디자인 시스템 및 설정 ---
 st.set_page_config(layout="wide", page_title="AI 행정관: The Legal Glass", page_icon="⚖️")
 
-# 글래스모피즘 및 라운딩 스타일 정의
+# 글래스모피즘 CSS 스타일 정의
 st.markdown("""
 <style>
-    /* 전체 배경: 부드러운 그라데이션 */
+    /* 전체 배경: 은은한 블루 그레이 그라데이션 */
     .stApp {
         background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
     }
     
-    /* 글래스모피즘 카드 스타일 */
+    /* 글래스모피즘 카드 */
     div.glass-card {
-        background: rgba(255, 255, 255, 0.6);
+        background: rgba(255, 255, 255, 0.65);
         box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        border-radius: 25px;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border-radius: 20px;
         border: 1px solid rgba(255, 255, 255, 0.4);
         padding: 25px;
         margin-bottom: 20px;
+        color: #1f2937;
     }
     
-    /* 제목 스타일 */
-    h1, h2, h3 {
+    /* 강조 텍스트 색상 */
+    .highlight-text {
         color: #1a237e;
-        font-family: 'Helvetica Neue', sans-serif;
         font-weight: 700;
+        background-color: rgba(26, 35, 126, 0.05);
+        padding: 2px 5px;
+        border-radius: 4px;
     }
     
-    /* 입력창 및 버튼 라운딩 */
-    .stTextArea textarea {
-        border-radius: 20px !important;
-        border: 1px solid rgba(255, 255, 255, 0.5) !important;
-        background: rgba(255, 255, 255, 0.8) !important;
-        box-shadow: inset 2px 2px 5px rgba(0,0,0,0.05) !important;
-    }
-    .stButton button {
-        border-radius: 30px !important;
-        background: linear-gradient(90deg, #4b6cb7 0%, #182848 100%) !important;
-        color: white !important;
-        font-weight: bold !important;
-        border: none !important;
-        padding: 12px 24px !important;
-        transition: all 0.3s ease !important;
-    }
-    .stButton button:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 10px 20px rgba(0,0,0,0.2) !important;
-    }
-    
-    /* 프로그레스 바 스타일 */
-    .stProgress > div > div > div > div {
-        background-image: linear-gradient(to right, #4b6cb7, #182848);
-    }
-    
-    /* 결과 카드 내부 헤더 */
+    /* 카드 헤더 아이콘 및 텍스트 */
     .result-header {
         display: flex;
         align-items: center;
         margin-bottom: 15px;
-        color: #182848;
         border-bottom: 2px solid rgba(75, 108, 183, 0.2);
         padding-bottom: 10px;
+        color: #102a43;
     }
-    .result-icon { font-size: 1.5rem; margin-right: 10px; }
+    .result-icon { font-size: 1.6rem; margin-right: 12px; }
+    h3 { margin: 0; padding: 0; font-family: 'Helvetica Neue', sans-serif; }
+    
+    /* 리스트 스타일 */
+    .custom-list-item {
+        margin-left: 10px;
+        margin-bottom: 6px;
+        text-indent: -15px;
+        padding-left: 15px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. 초기화 및 API 연결 ---
+# --- 1. 유틸리티 함수: 텍스트 포맷팅 (가독성 해결) ---
+def format_text_to_html(text):
+    """
+    AI가 준 Markdown 텍스트를 보기 편한 HTML로 변환합니다.
+    (줄바꿈, 볼드체, 리스트 처리)
+    """
+    if not text: return ""
+    
+    # 1. 굵은 글씨 (**text**) -> HTML 변환
+    text = re.sub(r'\*\*(.*?)\*\*', r'<span class="highlight-text">\1</span>', text)
+    
+    lines = text.split('\n')
+    html_output = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            html_output.append('<div style="height: 10px;"></div>') # 빈 줄 처리
+            continue
+            
+        # 리스트 처리 (- 또는 1. 등으로 시작하는 경우)
+        if line.startswith("- ") or line.startswith("* ") or line.startswith("• "):
+            line = f'<div class="custom-list-item">🔹 {line[1:].strip()}</div>'
+        elif re.match(r'^\d+\.', line): # 숫자 리스트 (1. )
+            line = f'<div style="margin-top:12px; font-weight:bold; color:#102a43;">{line}</div>'
+        else:
+            # 일반 문장
+            line = f'<div style="margin-bottom: 6px; line-height: 1.6;">{line}</div>'
+            
+        html_output.append(line)
+        
+    return "".join(html_output)
+
+# --- 2. 초기화 및 API 연결 ---
 try:
     GEMINI_API_KEY = st.secrets["general"]["GEMINI_API_KEY"]
     LAW_API_ID = st.secrets["general"]["LAW_API_ID"]
@@ -91,36 +110,32 @@ try:
 
     genai.configure(api_key=GEMINI_API_KEY)
 except Exception as e:
-    st.markdown(f"""<div class="glass-card" style="background:rgba(255,0,0,0.1);">
-    🚨 <b>시스템 연결 오류</b><br>API 키 설정(secrets.toml)을 확인해주세요.<br>Error: {e}</div>""", unsafe_allow_html=True)
+    st.error(f"🚨 API 키 설정 오류: {e}")
     st.stop()
 
 @st.cache_data
 def get_model():
     models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    for m in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro']:
+    for m in ['models/gemini-1.5-flash', 'models/gemini-1.5-flash-latest']:
         if m in models: return m
     return models[0] if models else None
 
 MODEL_NAME = get_model()
 
-# --- 2. 핵심 로직 (The Engines) ---
+# --- 3. 핵심 로직 엔진 ---
 
-def get_law_context_v2(situation, progress_callback):
-    """법령 엔진: 법령명 추론 후 전문 확보"""
-    progress_callback(10, "📜 AI가 상황에 맞는 법령을 추론 중입니다...")
+def get_law_context(situation, callback):
+    """[엔진 1] 법령 API"""
+    callback(10, "📜 상황에 맞는 법령을 식별하고 있습니다...")
     model = genai.GenerativeModel(MODEL_NAME)
-    
-    prompt = f"상황: {situation}\n관련된 대한민국 법령 정식 명칭 1개만 출력해. (예: 도로교통법)"
     try:
-        law_name = model.generate_content(prompt).text.strip()
-        law_name = re.sub(r'[^가-힣]', '', law_name)
-    except:
-        progress_callback(20, "⚠️ 법령명 추론 실패. 다음 단계로 이동합니다.")
-        return "식별 실패", ""
+        res = model.generate_content(f"상황: {situation}\n관련된 대한민국 법령명 1개만 정확히 출력해 (예: 도로교통법)").text
+        law_name = re.sub(r'[^가-힣]', '', res)
+    except: return "식별 실패", ""
 
-    progress_callback(25, f"🔍 '{law_name}'의 최신 조문 데이터를 국가법령정보센터에서 가져옵니다...")
+    callback(25, f"🏛️ '{law_name}'의 최신 조문 데이터를 가져옵니다...")
     try:
+        # 검색 -> 상세조문 확보
         search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={law_name}"
         root = ET.fromstring(requests.get(search_url).content)
         mst = root.find(".//법령일련번호").text
@@ -130,151 +145,134 @@ def get_law_context_v2(situation, progress_callback):
         detail_root = ET.fromstring(requests.get(detail_url).content)
         
         articles = []
-        # 토큰 효율과 속도를 위해 상위 중요 조문 30개만 추출
-        for a in detail_root.findall(".//조문")[:30]:
+        for a in detail_root.findall(".//조문")[:30]: # 상위 30개 조문
             num = a.find('조문번호').text or ""
             cont = a.find('조문내용').text or ""
             articles.append(f"[제{num}조] {cont}")
-        
-        progress_callback(40, f"✅ {real_name} 데이터 확보 완료.")
+            
+        callback(40, f"✅ 법령 데이터 확보 완료.")
         return real_name, "\n".join(articles)
     except:
-        progress_callback(40, f"⚠️ {law_name} 데이터 확보 실패. AI 기본 지식으로 대체합니다.")
-        return law_name, "법령 텍스트를 가져오지 못했습니다."
+        return law_name, "법령 원문을 가져오지 못했습니다."
 
-def get_google_search_results_v2(situation, progress_callback):
-    """현실 엔진: 구글 뉴스 및 사례 검색"""
-    progress_callback(50, "🌐 구글 웹에서 타 지자체 사례와 관련 뉴스를 검색합니다...")
-    query = f"{situation} 행정처분 사례 판례 해결"
-    
-    params = {"engine": "google", "q": query, "api_key": SERPAPI_KEY, "hl": "ko", "gl": "kr", "num": 5}
+def get_search_results(situation, callback):
+    """[엔진 2] 구글 서치 (SerpApi)"""
+    callback(50, "🔍 타 지자체 사례 및 판례를 검색합니다...")
     try:
+        params = {"engine": "google", "q": f"{situation} 행정처분 사례 판례", "api_key": SERPAPI_KEY, "num": 5}
         search = GoogleSearch(params)
         results = search.get_dict().get("organic_results", [])
-        snippets = []
-        for item in results:
-            snippets.append(f"- [{item.get('source', '웹')}] {item.get('title')}: {item.get('snippet')}")
-        progress_callback(70, f"✅ {len(snippets)}건의 유사 사례 및 뉴스 확보 완료.")
+        snippets = [f"- {item['title']}: {item['snippet']}" for item in results]
+        callback(70, "✅ 유사 사례 데이터 확보 완료.")
         return "\n".join(snippets)
-    except Exception as e:
-        progress_callback(70, "⚠️ 구글 검색 연결 실패. 다음 단계로 이동합니다.")
-        return f"구글 검색 실패: {e}"
+    except:
+        return "검색 결과 없음"
 
-def generate_final_report_v2(situation, law_name, law_text, search_text, progress_callback):
-    """종합 엔진: AI가 법과 현실을 종합하여 구조화된 리포트 작성"""
-    progress_callback(80, "🧠 확보된 데이터를 바탕으로 AI가 종합 분석 및 보고서를 작성합니다...")
+def generate_report(situation, law_name, law_text, search_text, callback):
+    """[엔진 3] AI 종합 분석 (구조화된 출력)"""
+    callback(80, "🧠 법리와 현실을 종합하여 보고서를 작성 중입니다...")
     model = genai.GenerativeModel(MODEL_NAME)
     
     prompt = f"""
-    당신은 유능한 행정관입니다. 다음 정보를 종합하여 담당자가 즉시 활용 가능한 보고서를 작성하세요.
+    당신은 유능한 행정관입니다. 아래 정보를 바탕으로 가독성 높은 보고서를 작성하세요.
     
     [민원] {situation}
-    [법적근거] 법령명: {law_name}\n{law_text}
-    [현실사례] {search_text}
+    [법적근거] {law_name}\n{law_text}
+    [참고사례] {search_text}
     
-    [출력 형식: 아래 섹션을 마크다운으로 구분하여 작성]
+    [작성 규칙]
+    1. 문단이 뭉치지 않게 **줄바꿈**을 자주 하세요.
+    2. 핵심 단어는 **굵게** 표시하세요.
+    3. 아래 섹션 구분자(# 번호.)를 반드시 지키세요.
+    
     # 1. 핵심 요약 (3줄 이내)
-    # 2. 법적 검토 및 근거 (조문 인용 필수)
-    # 3. 타 지자체/유사 사례 분석 (검색 결과 기반)
-    # 4. 실무 액션 플랜 (단계별 행동 지침)
-    # 5. (부록) 민원 답변용 공문 문안 초안
+    # 2. 법적 검토 및 근거
+    # 3. 유사 사례 및 현실 분석
+    # 4. 실무 액션 플랜
+    # 5. 민원 답변용 문안
     """
     res = model.generate_content(prompt)
-    progress_callback(100, "🎉 분석이 완료되었습니다!")
+    callback(100, "🎉 분석 완료!")
     return res.text
 
-# --- 3. UI 구성 ---
+# --- 4. UI 구성 및 실행 ---
 
-# Header Section
+# 타이틀
 st.markdown("""
-<div class="glass-card" style="text-align:center; padding: 30px;">
+<div class="glass-card" style="text-align:center;">
     <h1>⚖️ AI 행정관: The Legal Glass</h1>
-    <p style="font-size: 1.1rem; opacity: 0.8;">
-        법령의 <b>원칙(Rule)</b>과 현장의 <b>사례(Reality)</b>를 투명하게 종합하여 최적의 해답을 제시합니다.
-    </p>
+    <p style="color:#555;">법령(Rule)과 현실(Reality)을 융합한 최적의 행정 솔루션</p>
 </div>
 """, unsafe_allow_html=True)
 
-# Input Section
+# 입력창
 with st.container():
-    st.markdown('<div class="glass-card"><h3>📝 상황 접수</h3>', unsafe_allow_html=True)
-    user_input = st.text_area("구체적인 상황을 입력해주세요.", height=120, placeholder="예: 아파트 단지 내 장기 방치된 킥보드, 구청에서 강제 수거가 가능한가요?")
-    submit_btn = st.button("🚀 분석 시작하기", use_container_width=True)
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    user_input = st.text_area("민원 상황을 구체적으로 입력하세요", height=100, placeholder="예: 아파트 단지 내 장기 방치 킥보드, 구청이 강제 수거 가능한가요?")
+    btn = st.button("🚀 분석 시작", use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-# --- 4. 실행 및 결과 표시 ---
-
-if submit_btn and user_input:
-    # Progress UI
-    progress_container = st.empty()
-    progress_bar = progress_container.progress(0)
+if btn and user_input:
+    # 진행바 UI
+    progress_bar = st.progress(0)
     status_text = st.empty()
     
-    def update_progress(percent, text):
-        progress_bar.progress(percent)
-        status_text.markdown(f"""<div style="text-align:center; margin-top:10px; font-weight:bold; color:#182848;">
-        {text}</div>""", unsafe_allow_html=True)
-        time.sleep(0.3) # 시각적 인지를 위한 약간의 딜레이
+    def update(p, t):
+        progress_bar.progress(p)
+        status_text.markdown(f"<div style='text-align:center; font-weight:bold; color:#1a237e;'>{t}</div>", unsafe_allow_html=True)
+        time.sleep(0.2) # 시각적 딜레이
 
-    # Execution
-    try:
-        law_name, law_text = get_law_context_v2(user_input, update_progress)
-        search_text = get_google_search_results_v2(user_input, update_progress)
-        final_report = generate_final_report_v2(user_input, law_name, law_text, search_text, update_progress)
+    # 실행
+    law_name, law_text = get_law_context(user_input, update)
+    search_text = get_search_results(user_input, update)
+    final_text = generate_report(user_input, law_name, law_text, search_text, update)
+    
+    time.sleep(1)
+    progress_bar.empty()
+    status_text.empty()
+    
+    # 결과 출력 (섹션 파싱 + HTML 변환)
+    sections = re.split(r'# \d+\. ', final_text)
+    
+    st.divider()
+    
+    if len(sections) >= 6:
+        # 1. 요약
+        st.markdown(f"""<div class="glass-card">
+            <div class="result-header"><span class="result-icon">💡</span><h3>핵심 요약</h3></div>
+            {format_text_to_html(sections[1].strip())}
+        </div>""", unsafe_allow_html=True)
         
-        # Cleanup Progress UI
-        time.sleep(1)
-        progress_container.empty()
-        status_text.empty()
-
-        # --- 결과 화면 (Actionable Cards) ---
-        st.divider()
-        st.markdown("### 📊 분석 결과 보고서")
-
-        # AI의 마크다운 응답을 섹션별로 파싱 (간이 파싱)
-        sections = re.split(r'# \d+\. ', final_report)
-        # sections[0]은 빈 문자열, [1]부터 요약, 법적검토... 순서
-
-        if len(sections) >= 6:
-            # Card 1: 핵심 요약
-            st.markdown(f"""<div class="glass-card">
-                <div class="result-header"><span class="result-icon">💡</span><h3>핵심 요약</h3></div>
-                {sections[1].strip()}
+        c1, c2 = st.columns(2)
+        with c1:
+            # 2. 법적 검토
+            st.markdown(f"""<div class="glass-card" style="min-height:350px;">
+                <div class="result-header"><span class="result-icon">📜</span><h3>법적 검토</h3></div>
+                <div style="margin-bottom:10px; font-size:0.9em; color:#666;">적용법령: <b>{law_name}</b></div>
+                {format_text_to_html(sections[2].strip())}
+            </div>""", unsafe_allow_html=True)
+        with c2:
+            # 3. 사례 분석
+            st.markdown(f"""<div class="glass-card" style="min-height:350px;">
+                <div class="result-header"><span class="result-icon">🔍</span><h3>유사 사례 분석</h3></div>
+                {format_text_to_html(sections[3].strip())}
             </div>""", unsafe_allow_html=True)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                # Card 2: 법적 검토
-                st.markdown(f"""<div class="glass-card" style="min-height: 300px;">
-                    <div class="result-header"><span class="result-icon">📜</span><h3>법적 검토 및 근거</h3></div>
-                    <b>적용 법령: {law_name}</b><br><br>
-                    {sections[2].strip()}
-                </div>""", unsafe_allow_html=True)
-            with col2:
-                 # Card 3: 타 사례 분석
-                st.markdown(f"""<div class="glass-card" style="min-height: 300px;">
-                    <div class="result-header"><span class="result-icon">🔍</span><h3>유사 사례 / 현실 분석</h3></div>
-                    {sections[3].strip()}
-                </div>""", unsafe_allow_html=True)
-
-            # Card 4: 액션 플랜
-            st.markdown(f"""<div class="glass-card" style="border-left: 5px solid #4b6cb7;">
-                <div class="result-header"><span class="result-icon">👣</span><h3>실무 액션 플랜</h3></div>
-                {sections[4].strip()}
-            </div>""", unsafe_allow_html=True)
+        # 4. 액션 플랜
+        st.markdown(f"""<div class="glass-card" style="border-left: 5px solid #1a237e;">
+            <div class="result-header"><span class="result-icon">👣</span><h3>실무 액션 플랜</h3></div>
+            {format_text_to_html(sections[4].strip())}
+        </div>""", unsafe_allow_html=True)
+        
+        # 5. 공문 초안
+        with st.expander("📄 [부록] 답변용 공문/문자 초안 보기"):
+            st.code(sections[5].strip(), language='text')
             
-            # Card 5: 공문 초안 (복사하기 쉽게)
-            with st.expander("📄 [부록] 답변용 공문 문안 초안 보기"):
-                st.code(sections[5].strip(), language="text")
-                st.caption("위 텍스트를 복사하여 한글/엑셀 등에 붙여넣으세요.")
+    else:
+        # 파싱 실패 시 원본 출력
+        st.markdown(f'<div class="glass-card">{format_text_to_html(final_text)}</div>', unsafe_allow_html=True)
 
-        else:
-            # 파싱 실패 시 원본 출력 (Fallback)
-            st.markdown(f'<div class="glass-card">{final_report}</div>', unsafe_allow_html=True)
-
-        # DB 저장
-        if use_db:
-            supabase.table("law_reports").insert({"situation": user_input, "law_name": law_name, "summary": "Glass UI Report Completed"}).execute()
-
-    except Exception as e:
-        st.error(f"분석 중 오류가 발생했습니다: {e}")
+    # DB 저장
+    if use_db:
+        try: supabase.table("law_reports").insert({"situation": user_input, "law_name": law_name, "summary": "Complete"}).execute()
+        except: pass
