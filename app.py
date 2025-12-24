@@ -47,28 +47,10 @@ except Exception as e:
     st.error(f"🚨 API 키 설정 오류: {e}")
     st.stop()
 
-# [핵심 수정] 사용 가능한 모델을 자동으로 찾는 함수 (404 에러 방지)
+# [수정됨] 모델을 'gemini-1.5-flash'로 강제 고정 (하루 1500회 무료)
 @st.cache_data
 def get_best_model():
-    try:
-        # 내 API 키로 사용 가능한 모델 리스트 조회
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 우선순위: Flash -> Pro -> 1.0 Pro
-        priorities = [
-            'models/gemini-1.5-flash',
-            'models/gemini-1.5-flash-latest',
-            'models/gemini-1.5-pro',
-            'models/gemini-pro'
-        ]
-        
-        for p in priorities:
-            if p in available_models: return p
-            
-        # 우선순위 모델이 없으면 아무거나 가능한 것 반환
-        return available_models[0] if available_models else 'models/gemini-pro'
-    except:
-        return 'models/gemini-pro' # 최후의 수단
+    return 'models/gemini-1.5-flash'
 
 MODEL_NAME = get_best_model()
 
@@ -180,7 +162,7 @@ def generate_report_safe(situation, law_name, law_text, search_text, callback):
 st.markdown(f"""
 <div style="text-align:center; padding: 20px; background: rgba(255,255,255,0.6); border-radius: 20px; border: 1px solid rgba(255,255,255,0.4);">
     <h1 style="color:#1a237e;">⚖️ AI 행정관: The Legal Glass</h1>
-    <span class="status-badge">Auto-Detect Model: {MODEL_NAME}</span>
+    <span class="status-badge">Model Fixed: {MODEL_NAME} (1.5K limit)</span>
 </div>
 <br>
 """, unsafe_allow_html=True)
