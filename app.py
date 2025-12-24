@@ -6,7 +6,7 @@ import json
 import re
 from supabase import create_client, Client
 
-# --- 1. 설정 및 보안키 로드 ---
+# --- 1. 설정 및 초기화 ---
 st.set_page_config(layout="wide", page_title="행정업무 내비게이션")
 
 try:
@@ -21,56 +21,47 @@ except Exception as e:
     st.error(f"🚨 설정 오류: {e}")
     st.stop()
 
-# --- 2. [핵심] 사용 가능한 모델 자동 감지 함수 ---
-@st.cache_data(show_spinner=False)
-def get_best_available_model():
-    """
-    내 API 키로 사용할 수 있는 모델 중 가장 좋은 것을 자동으로 선택합니다.
-    404 에러를 방지하는 핵심 함수입니다.
-    """
+# --- 2. 모델 설정 (에러 원인 해결 파트) ---
+def get_valid_model_name():
+    """API 키로 접근 가능한 모델 목록을 조회하여 유효한 모델명을 반환"""
     try:
-        # 1. 사용 가능한 모델 리스트 조회
         available_models = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
                 available_models.append(m.name)
         
-        # 2. 우선순위 설정 (안정적이고 빠른 순서)
-        # 주의: API에서는 'models/' 접두사가 붙는 경우가 많음
-        priority_list = [
+        preferred_order = [
             'models/gemini-1.5-flash',
             'models/gemini-1.5-flash-latest',
             'models/gemini-1.5-pro',
             'models/gemini-1.0-pro',
-            'gemini-1.5-flash', # 접두사 없는 경우 대비
+            'models/gemini-pro'
         ]
-
-        # 3. 교집합 찾기 (우선순위 모델이 내 리스트에 있는지 확인)
-        for target in priority_list:
-            if target in available_models:
-                return target
         
-        # 4. 우선순위 모델이 없으면 리스트의 첫 번째 모델 반환 (최후의 수단)
+        for p in preferred_order:
+            if p in available_models:
+                return p, available_models
+        
         if available_models:
-            return available_models[0]
-        else:
-            return None
+            return available_models[0], available_models
             
+        return None, []
     except Exception as e:
-        return None
+        return None, []
 
-# 전역 변수로 모델명 확정
-CURRENT_MODEL_NAME = get_best_available_model()
+# 전역 변수 설정
+CURRENT_MODEL_NAME, ALL_MODELS_LIST = get_valid_model_name()
 
-# --- 3. 최적화된 엔진 ---
+# --- 3. 로직 함수 (수정됨: model_name을 인자로 받음) ---
 
 @st.cache_data(ttl=3600)
-def search_law_name(situation):
-    """[AI 1단계] 법령명 추론 (프롬프트 강화 버전)"""
-    if not CURRENT_MODEL: return "모델 오류"
-    model = genai.GenerativeModel(CURRENT_MODEL)
+def search_law_name(situation, model_name):
+    """
+    [수정됨] model_name을 인자로 받아서 NameError 방지
+    """
+    if not model_name: return "모델 오류"
     
-    # 변경점: '도로' 같은 단답형 말고 '도로교통법' 같은 풀네임을 요구
+    model = genai.GenerativeModel(model_name)
     prompt = f"""
     상황: {situation}
     
@@ -87,109 +78,83 @@ def search_law_name(situation):
         return response.text.strip()
     except Exception as e:
         return f"에러: {str(e)}"
-        
+
 def fetch_and_filter_articles(law_name, situation_keywords):
-    """[Python 로직] 조문 필터링 (안전장치 추가)"""
-    # 1. 법령 검색
+    """[Python 로직] 조문 필터링 (안전장치 포함)"""
     try:
-        # 검색 정확도를 높이기 위해 정확한 명칭으로 요청
+        # 1. 법령 검색
         search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={law_name}"
         res = requests.get(search_url, timeout=5)
         root = ET.fromstring(res.content)
         
-        # 검색 결과가 여러 개일 경우, 첫 번째 결과가 가장 정확할 확률이 높음
         law_node = root.find(".//law")
         if law_node is None: return None, None
         
         mst = law_node.find("법령일련번호").text
         full_name = law_node.find("법령명한글").text
-    except Exception as e:
-        print(f"법령 검색 실패: {e}")
-        return None, None
 
-    # 2. 조문 가져오기
-    try:
+        # 2. 조문 상세 조회
         detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst}&type=XML"
         res = requests.get(detail_url, timeout=10)
         root = ET.fromstring(res.content)
         
         keywords = set(situation_keywords.replace(" ", ",").split(","))
         scored = []
+        all_articles = []
         
-        # 모든 조문 순회
-        all_articles = [] # 점수가 없어도 일단 담아둘 리스트
         for a in root.findall(".//조문"):
             cont = a.find('조문내용').text or ""
             num = a.find('조문번호').text or ""
+            text = f"제{num}조: {cont}"
+            all_articles.append(text)
             
-            # 전체 리스트에 저장 (형식: 제N조 내용)
-            article_text = f"제{num}조: {cont}"
-            all_articles.append(article_text)
-            
-            # 점수 계산
             score = sum(1 for k in keywords if len(k) > 1 and k in cont)
             if score > 0:
-                scored.append((score, article_text))
+                scored.append((score, text))
         
-        # [수정된 로직]
-        # 1순위: 키워드가 매칭된 조문이 있으면 그걸 쓴다.
+        # 1순위: 키워드 매칭, 2순위: 단순 상위 조문 (Fallback)
         if scored:
             scored.sort(key=lambda x: x[0], reverse=True)
             return full_name, "\n".join([x[1] for x in scored[:5]])
-        
-        # 2순위 (Fallback): 키워드 매칭이 하나도 안 됐으면, 그냥 앞부분 5개 조문이라도 보낸다.
-        # (AI가 '도로'라고 잘못 찾았어도, 내용은 보여주기 위함)
         elif all_articles:
             return full_name, "\n".join(all_articles[:5])
-            
         else:
             return None, None
             
     except Exception as e:
-        print(f"조문 추출 실패: {e}")
         return None, None
-def generate_report(situation, law_name, context):
-    """[AI 2단계] 리포트 생성"""
-    if not context or not CURRENT_MODEL_NAME: return None
+
+def generate_report(situation, law_name, context, model_name):
+    """
+    [수정됨] model_name을 인자로 받아서 NameError 방지
+    """
+    if not context or not model_name: return None
     
-    model = genai.GenerativeModel(CURRENT_MODEL_NAME)
-    
+    model = genai.GenerativeModel(model_name)
     prompt = f"""
-    당신은 행정 전문가입니다. 아래 정보를 바탕으로 민원 대응 보고서를 JSON으로 작성하세요.
-    
-    [상황] {situation}
-    [참조 조문]
-    {context}
-    
-    [JSON 형식]
-    {{
-        "summary": "법적 근거 요약",
-        "steps": [
-            {{"title": "단계 1", "desc": "내용"}},
-            {{"title": "단계 2", "desc": "내용"}},
-            {{"title": "단계 3", "desc": "내용"}}
-        ],
-        "tip": "실무 팁"
-    }}
+    상황: {situation}
+    법령: {context}
+    위 내용을 바탕으로 'summary'(요약), 'steps'(단계별 대응 배열), 'tip'(팁)을 포함한 JSON을 작성하라.
     """
     try:
-        response = model.generate_content(
-            prompt, 
-            generation_config={"response_mime_type": "application/json", "temperature": 0.5}
-        )
-        return json.loads(response.text)
+        res = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+        return json.loads(res.text)
     except: return None
 
-# --- 4. UI 및 실행 ---
+# --- 4. UI ---
 
 st.title("⚡️ 초효율 공무원 AI 어시스턴트")
 
-# 모델 연결 상태 표시 (사이드바)
+# 사이드바 상태 표시
 with st.sidebar:
+    st.header("🔧 시스템 상태")
     if CURRENT_MODEL_NAME:
-        st.success(f"✅ 연결된 모델: {CURRENT_MODEL_NAME}")
+        st.success(f"✅ 연결 성공: {CURRENT_MODEL_NAME}")
     else:
-        st.error("❌ 사용 가능한 Gemini 모델을 찾을 수 없습니다. API 키를 확인하세요.")
+        st.error("❌ 사용 가능한 모델 없음 (API 키 확인 필요)")
+        
+    with st.expander("모델 전체 리스트"):
+        st.write(ALL_MODELS_LIST)
 
 user_input = st.text_area("민원 내용 입력", height=100, placeholder="예: 인도 위 불법 주정차 단속 근거")
 
@@ -197,55 +162,40 @@ if st.button("분석 실행", type="primary"):
     if not user_input or not CURRENT_MODEL_NAME:
         st.warning("내용을 입력하거나 모델 연결을 확인해주세요.")
     else:
-        with st.status("⚙️ 지능형 프로세스 가동 중...", expanded=True) as status:
+        with st.status("분석 중...") as status:
+            # 1. 법령 탐색 (인자로 모델명 전달)
+            status.write("1. 법령 탐색...")
+            inferred = search_law_name(user_input, CURRENT_MODEL_NAME)
             
-            # 1. 법령명 추론
-            status.write("1. 관련 법령 탐색 중...")
-            inferred_law = search_law_name(user_input)
-            
-            if "에러" in inferred_law or "실패" in inferred_law:
-                st.error(f"AI 호출 중 오류 발생: {inferred_law}")
+            if "에러" in inferred:
+                st.error(f"API 에러: {inferred}")
                 st.stop()
                 
-            clean_law_name = re.sub(r'[^가-힣]', '', inferred_law)
+            clean_name = re.sub(r'[^가-힣]', '', inferred)
             
-            # 2. Python 필터링
-            status.write(f"2. [{clean_law_name}] 내 핵심 조문 추출 중...")
-            full_law_name, relevant_articles = fetch_and_filter_articles(clean_law_name, user_input)
+            # 2. 조문 추출
+            status.write(f"2. {clean_name} 조문 추출...")
+            full_name, context = fetch_and_filter_articles(clean_name, user_input)
             
-            if relevant_articles:
-                # 3. 리포트 생성
-                status.write("3. 최종 리포트 작성 중...")
-                result = generate_report(user_input, full_law_name, relevant_articles)
+            if context:
+                # 3. 리포트 생성 (인자로 모델명 전달)
+                status.write("3. 리포트 생성...")
+                res = generate_report(user_input, full_name, context, CURRENT_MODEL_NAME)
                 
-                if result:
-                    status.update(label="완료!", state="complete")
-                    
+                if res:
+                    status.update(label="완료", state="complete")
                     st.divider()
-                    st.success(f"📌 적용 법령: **{full_law_name}**")
-                    st.write(f"ℹ️ **요약**: {result['summary']}")
+                    st.success(f"📌 {full_name}")
+                    st.write(res.get('summary'))
+                    for s in res.get('steps', []):
+                        st.info(f"**{s['title']}**: {s['desc']}")
+                    st.warning(f"팁: {res.get('tip')}")
                     
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        for step in result['steps']:
-                            st.subheader(step['title'])
-                            st.write(step['desc'])
-                    with c2:
-                        st.warning(f"💡 팁: {result['tip']}")
-                        with st.expander("참조된 조문"):
-                            st.code(relevant_articles, language="text")
-                    
-                    # DB 저장
                     try:
                         supabase.table("law_reports").insert({
-                            "situation": user_input, 
-                            "law_name": full_law_name,
-                            "summary": result['summary'], 
-                            "tip": result['tip']
+                            "situation": user_input, "law_name": full_name,
+                            "summary": res['summary'], "tip": res['tip']
                         }).execute()
-                    except: pass 
-                else:
-                    st.error("리포트 생성에 실패했습니다.")
+                    except: pass
             else:
-                st.error(f"'{clean_law_name}' 데이터를 찾을 수 없습니다. 질문을 구체적으로 수정해보세요.")
-
+                st.error(f"'{clean_name}'에 대한 조문 데이터를 가져오지 못했습니다.")
