@@ -6,7 +6,7 @@ from serpapi import GoogleSearch
 import re
 import time
 from supabase import create_client
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, InternalServerError
 
 # --- 0. 디자인 시스템 ---
 st.set_page_config(layout="wide", page_title="AI 행정관: The Legal Glass", page_icon="⚖️")
@@ -57,33 +57,30 @@ def get_model():
 
 MODEL_NAME = get_model()
 
-# --- 2. 로직 엔진 (안전 모드 적용) ---
+# --- 2. 로직 엔진 (생존 모드 적용) ---
 
 def get_law_context(situation, callback):
-    """[엔진 1] 법령 API (60개 제한)"""
+    """[엔진 1] 법령 API (초경량 모드: 20개 제한)"""
     callback(10, "📜 상황에 맞는 법령을 식별 중입니다...")
     model = genai.GenerativeModel(MODEL_NAME)
     try:
-        # 법령명 찾기
         res = model.generate_content(f"상황: {situation}\n관련된 대한민국 법령명 1개만 정확히 출력해 (예: 도로교통법)").text
         law_name = re.sub(r'[^가-힣]', '', res)
     except: return "식별 실패", ""
 
-    callback(30, f"🏛️ '{law_name}'의 핵심 조문을 분석합니다...")
+    callback(30, f"🏛️ '{law_name}'의 핵심 조문(Top 20)을 가져옵니다...")
     try:
-        # 1. 법령 ID 검색
         search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={law_name}"
         root = ET.fromstring(requests.get(search_url, timeout=5).content)
         mst = root.find(".//법령일련번호").text
         real_name = root.find(".//법령명한글").text
         
-        # 2. 상세 조문 가져오기
         detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst}&type=XML"
         detail_root = ET.fromstring(requests.get(detail_url, timeout=10).content)
         
         articles = []
-        # [수정] 60개로 제한하여 멈춤 방지
-        for a in detail_root.findall(".//조문")[:60]: 
+        # [긴급 수정] 60개 -> 20개 (일단 돌아가게 만드는 게 최우선)
+        for a in detail_root.findall(".//조문")[:20]: 
             num = a.find('조문번호').text or ""
             cont = a.find('조문내용').text or ""
             articles.append(f"[제{num}조] {cont}")
@@ -97,7 +94,8 @@ def get_search_results(situation, callback):
     """[엔진 2] 구글 서치"""
     callback(60, "🔍 유사 사례 및 판례를 검색합니다...")
     try:
-        params = {"engine": "google", "q": f"{situation} 행정처분 사례 판례", "api_key": SERPAPI_KEY, "num": 3} # 검색도 3개로 줄임
+        # 검색 결과도 3개로 유지 (가벼움)
+        params = {"engine": "google", "q": f"{situation} 행정처분 사례 판례", "api_key": SERPAPI_KEY, "num": 3}
         search = GoogleSearch(params)
         results = search.get_dict().get("organic_results", [])
         snippets = [f"- [{item.get('source', '웹')}] {item['title']}: {item['snippet']}" for item in results]
@@ -106,46 +104,63 @@ def get_search_results(situation, callback):
         return "검색 결과 없음"
 
 def generate_report(situation, law_name, law_text, search_text, callback):
-    """[엔진 3] AI 종합 분석 (재시도 로직 강화)"""
-    callback(80, "🧠 법리와 현실을 종합하여 보고서를 작성 중입니다...")
+    """[엔진 3] AI 종합 분석 (비상 착륙 시스템 탑재)"""
+    callback(80, "🧠 최종 분석 보고서를 작성 중입니다...")
     model = genai.GenerativeModel(MODEL_NAME)
     
-    prompt = f"""
-    당신은 행정관입니다. 아래 정보를 바탕으로 보고서를 작성하세요.
-    HTML 태그는 쓰지 말고 마크다운(##)만 사용하세요.
+    # 1. 정석 프롬프트 (법령 원문 포함)
+    full_prompt = f"""
+    당신은 행정관입니다. 아래 정보를 종합하여 보고서를 작성하세요.
+    HTML 태그 금지. 마크다운(##) 사용 필수.
     
     [민원] {situation}
     [법령] {law_name}\n{law_text}
     [사례] {search_text}
     
     ## 💡 핵심 요약
-    (3줄 이내)
     ## 📜 법적 검토 및 근거
-    (조항 명시)
     ## 🔍 유사 사례 및 현실 분석
-    (검색 기반)
     ## 👣 실무 액션 플랜
-    (단계별 지침)
     ## 📄 민원 답변용 문안
-    (정중한 답변)
     """
     
-    # [멈춤 방지] 에러 발생 시 재시도 로직
+    # 2. 비상용 프롬프트 (법령 원문 뺌 - 토큰 절약용)
+    emergency_prompt = f"""
+    [긴급모드] 당신은 행정 전문가입니다. 아래 민원에 대해 당신의 지식과 검색 결과를 활용해 답변하세요.
+    법령 원문 데이터가 누락되었으므로, 당신이 알고 있는 '{law_name}' 지식을 활용하세요.
+    
+    [민원] {situation}
+    [사례] {search_text}
+    
+    ## 💡 핵심 요약
+    ## 📜 법적 검토 (AI 지식 기반)
+    ## 🔍 유사 사례 분석
+    ## 👣 실무 액션 플랜
+    ## 📄 민원 답변용 문안
+    """
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            res = model.generate_content(prompt)
+            # 시도: 정석대로 실행
+            res = model.generate_content(full_prompt)
             callback(100, "🎉 분석 완료!")
             return res.text
-        except (ResourceExhausted, ServiceUnavailable):
-            # 과부하 걸리면 잠시 대기
-            wait_time = (attempt + 1) * 3  # 3초, 6초, 9초 대기
-            callback(85, f"⚠️ 트래픽이 많아 잠시 숨 고르는 중... ({attempt+1}/{max_retries})")
-            time.sleep(wait_time)
+        except (ResourceExhausted, ServiceUnavailable, InternalServerError):
+            # 실패 시: 대기 후 재시도
+            wait = (attempt + 1) * 4 # 4초, 8초...
+            callback(85, f"⚠️ 서버 혼잡으로 대기 중... ({attempt+1}/{max_retries})")
+            time.sleep(wait)
         except Exception as e:
-            return f"❌ 분석 중 오류 발생: {str(e)}"
+            return f"오류 발생: {e}"
             
-    return "죄송합니다. 서버 혼잡으로 분석을 완료하지 못했습니다. 잠시 후 다시 시도해주세요."
+    # [최후의 수단] 3번 다 실패하면 -> 법령 원문 빼고(가볍게) 실행
+    try:
+        callback(90, "🚨 긴급 모드: 데이터를 줄여서 답변을 강제 생성합니다.")
+        res = model.generate_content(emergency_prompt)
+        return res.text
+    except:
+        return "죄송합니다. 구글 AI 서버가 현재 응답하지 않습니다. 잠시 후 다시 시도해주세요."
 
 # --- 3. UI 구성 및 실행 ---
 
@@ -169,16 +184,15 @@ if btn and user_input:
     def update(p, t):
         progress_bar.progress(p)
         status_text.caption(f"running... {t}")
-        # UI 업데이트를 위한 아주 짧은 딜레이
-        time.sleep(0.05)
+        time.sleep(0.1)
 
     # 1. 법령 가져오기
     law_name, law_text = get_law_context(user_input, update)
-    time.sleep(1.0) # [중요] API 연속 호출 방지 (1초 휴식)
+    time.sleep(2.0) # [중요] API 휴식 (2초)
     
     # 2. 검색하기
     search_text = get_search_results(user_input, update)
-    time.sleep(0.5) 
+    time.sleep(1.0) # [중요] API 휴식 (1초)
     
     # 3. 리포트 생성
     final_text = generate_report(user_input, law_name, law_text, search_text, update)
