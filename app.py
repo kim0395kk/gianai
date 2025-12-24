@@ -6,7 +6,7 @@ from serpapi import GoogleSearch
 import re
 import time
 from supabase import create_client
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, InternalServerError
+from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, InternalServerError, NotFound
 
 # --- 0. 디자인 시스템 ---
 st.set_page_config(layout="wide", page_title="AI 행정관: The Legal Glass", page_icon="⚖️")
@@ -47,17 +47,33 @@ except Exception as e:
     st.error(f"🚨 API 키 설정 오류: {e}")
     st.stop()
 
-# [수정됨] 모델을 'gemini-1.5-flash'로 강제 고정 (하루 1500회 무료)
+# [핵심] 사용 가능한 모델을 자동으로 찾아주는 함수 (404 방지)
 @st.cache_data
 def get_best_model():
-    return 'models/gemini-1.5-flash'
+    try:
+        # 내 키로 쓸 수 있는 모델 리스트를 서버에 물어봄
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # 1순위: 1.5 Flash (빠르고 무료량 많음)
+        for m in models:
+            if 'gemini-1.5-flash' in m: return m
+            
+        # 2순위: 1.5 Pro
+        for m in models:
+            if 'gemini-1.5-pro' in m: return m
+            
+        # 3순위: 아무거나 되는 거 (Gemini Pro 등)
+        return models[0] if models else 'models/gemini-pro'
+    except:
+        # 목록 조회 실패 시 가장 기본 모델로 강제 지정
+        return 'models/gemini-pro'
 
 MODEL_NAME = get_best_model()
 
 # --- 2. 로직 엔진 ---
 
 def get_law_context(situation, callback):
-    """[엔진 1] 법령 API (안전 제일 모드)"""
+    """[엔진 1] 법령 API"""
     callback(10, "📜 법령 식별 중...")
     model = genai.GenerativeModel(MODEL_NAME)
     try:
@@ -76,7 +92,7 @@ def get_law_context(situation, callback):
         detail_root = ET.fromstring(requests.get(detail_url, timeout=5).content)
         
         articles = []
-        # [안전장치] 딱 10개만 가져옵니다.
+        # [안전장치] 10개 제한
         for a in detail_root.findall(".//조문")[:10]: 
             num = a.find('조문번호').text or ""
             cont = a.find('조문내용').text or ""
@@ -100,14 +116,14 @@ def get_search_results(situation, callback):
         return ""
 
 def generate_report_safe(situation, law_name, law_text, search_text, callback):
-    """[엔진 3] 과부하 방지 스마트 로직"""
+    """[엔진 3] 과부하/에러 방지 스마트 로직"""
     model = genai.GenerativeModel(MODEL_NAME)
     
-    # [핵심] 입력 데이터가 너무 길면 Python에서 미리 자릅니다.
+    # 입력 데이터 다이어트
     if len(law_text) > 3000:
         law_text = law_text[:3000] + "...(생략)"
     
-    # 전략 1: 표준 모드
+    # 1. 표준 모드 프롬프트
     prompt_std = f"""
     당신은 행정관입니다. 마크다운 보고서를 작성하세요.
     [민원] {situation}
@@ -121,16 +137,14 @@ def generate_report_safe(situation, law_name, law_text, search_text, callback):
     ## 📄 답변 초안
     """
 
-    # 전략 2: 비상 모드 (법령 텍스트 제거)
+    # 2. 비상 모드 프롬프트
     prompt_lite = f"""
-    [비상모드] 법령 데이터가 누락되었습니다. 당신의 행정 지식으로 답변하세요.
+    [비상모드] 데이터 부족으로 당신의 지식으로 답변합니다.
     [민원] {situation}
     [관련법] {law_name}
-    [사례] {search_text}
     
     ## 💡 핵심 요약
-    ## 📜 법적 검토 (AI 지식 기반)
-    ## 🔍 유사 사례
+    ## 📜 법적 검토 (AI 지식)
     ## 👣 조치 계획
     ## 📄 답변 초안
     """
@@ -142,27 +156,26 @@ def generate_report_safe(situation, law_name, law_text, search_text, callback):
         callback(100, "🎉 분석 완료!")
         return res.text
     except Exception as e:
-        print(f"1차 실패: {e}") 
+        print(f"1차 에러: {e}")
 
-    # 2차 시도 (실패 시 충분히 쉬고 가벼운 요청으로)
-    for i in range(5, 0, -1):
-        callback(85, f"⚠️ 트래픽 조절 중... {i}초 대기")
+    # 2차 시도 (대기 후 경량화)
+    for i in range(3, 0, -1):
+        callback(85, f"⚠️ 연결 재시도 중... {i}초")
         time.sleep(1)
         
-    callback(90, "🚀 [2차] 경량화 모드로 재시도...")
+    callback(90, "🚀 [2차] 비상 모드로 전환...")
     try:
-        # 토큰을 확 줄인 Lite 프롬프트 사용
         res = model.generate_content(prompt_lite)
-        return res.text + "\n\n*(트래픽 과부하로 인해 경량 모드로 작성되었습니다)*"
+        return res.text + "\n\n*(서버 문제로 비상 모드로 작성되었습니다)*"
     except Exception as e:
-        return f"죄송합니다. 서버가 현재 너무 혼잡합니다. 잠시 후(1분 뒤) 다시 시도해주세요.\n(Error: {e})"
+        return f"죄송합니다. AI 모델 연결에 실패했습니다.\n사용 중인 모델: {MODEL_NAME}\n에러 메시지: {e}"
 
 # --- 3. UI 실행 ---
 
 st.markdown(f"""
 <div style="text-align:center; padding: 20px; background: rgba(255,255,255,0.6); border-radius: 20px; border: 1px solid rgba(255,255,255,0.4);">
     <h1 style="color:#1a237e;">⚖️ AI 행정관: The Legal Glass</h1>
-    <span class="status-badge">Model Fixed: {MODEL_NAME} (1.5K limit)</span>
+    <span class="status-badge">Connected: {MODEL_NAME}</span>
 </div>
 <br>
 """, unsafe_allow_html=True)
@@ -205,7 +218,6 @@ if btn and user_input:
             st.markdown('<div style="background-color:rgba(0,0,0,0);"></div>', unsafe_allow_html=True)
             st.markdown(section)
 
-    # DB 저장
     if use_db:
         try:
             supabase.table("law_reports").insert({
