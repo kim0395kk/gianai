@@ -10,7 +10,7 @@ from supabase import create_client
 from groq import Groq 
 
 # --- 0. 디자인 및 초기 설정 ---
-st.set_page_config(layout="wide", page_title="AI 행정관: The Legal Glass (Tenbagger Ed.)", page_icon="⚖️")
+st.set_page_config(layout="wide", page_title="AI 행정관: The Legal Glass (Ultimate)", page_icon="⚖️")
 
 st.markdown("""
 <style>
@@ -75,7 +75,6 @@ def generate_content_hybrid(prompt, temp=0.1):
     for model_name in GEMINI_PRIORITY_LIST:
         try:
             model = genai.GenerativeModel(model_name)
-            # 빠른 전환을 위해 타임아웃 8초 설정
             res = model.generate_content(prompt, request_options={'timeout': 8})
             return res.text, f"Gemini ({model_name})"
         except Exception:
@@ -88,7 +87,7 @@ def generate_content_hybrid(prompt, temp=0.1):
             system_role = """
             당신은 대한민국 최고의 행정법 전문 변호사입니다.
             1. 판례와 법령에 기반하여 냉철하고 전문적인 어조로 답변하십시오.
-            2. 추측성 발언을 삼가고, 주어진 데이터 내에서 근거를 찾으십시오.
+            2. 추상적인 답변 대신 실질적인 해결책을 제시하십시오.
             3. 답변은 마크다운 형식을 준수하십시오.
             """
             
@@ -107,13 +106,61 @@ def generate_content_hybrid(prompt, temp=0.1):
     else:
         return "Gemini 연결 실패 및 Groq 키 없음.", "Fail"
 
-# --- 3. [Tenbagger Logic] 법령 판단 및 검색 강화 ---
+# --- 3. [Advanced Logic] 스마트 법령 필터링 ---
+
+def get_relevant_articles(detail_root, situation):
+    """
+    [Core Tech] 법령 전체를 다 가져오는 게 아니라,
+    사용자 상황(Situation)과 연관된 '법률 용어'가 포함된 조문만 필터링.
+    """
+    # 1. 사용자 입력을 '법률 매핑 키워드'로 변환
+    mapping_keywords = ["금지", "관리", "처분", "과태료", "벌칙", "의무", "안전", "제1조"]
+    
+    # 동적 매핑 추가
+    if "킥보드" in situation or "자전거" in situation or "이동장치" in situation:
+        mapping_keywords.extend(["통행", "장애", "적치", "이동", "도로"])
+    if "주차" in situation:
+        mapping_keywords.extend(["주차", "교통", "방해", "견인"])
+    if "소음" in situation:
+        mapping_keywords.extend(["소음", "진동", "환경", "차음"])
+    if "아파트" in situation or "단지" in situation:
+        mapping_keywords.extend(["입주자", "관리주체", "공용", "전유"])
+        
+    filtered_articles = []
+    
+    # XML 파싱 및 필터링
+    for a in detail_root.findall(".//조문"):
+        num = a.find('조문번호').text or ""
+        cont = a.find('조문내용').text or ""
+        
+        # 항/호 내용까지 텍스트로 합쳐서 검색
+        full_text = cont
+        sub_clauses = []
+        for sub in a.findall(".//항"):
+            s_num = sub.find('항번호').text or ""
+            s_cont = sub.find('항내용').text or ""
+            full_text += f" {s_cont}"
+            sub_clauses.append(f"  ({s_num}) {s_cont}")
+            
+        # [Filter Logic] 매핑된 키워드가 하나라도 있으면 가져옴
+        if any(kw in full_text for kw in mapping_keywords):
+            article_str = f"[제{num}조] {cont}\n" + "\n".join(sub_clauses)
+            filtered_articles.append(article_str)
+            
+    # 필터링 결과가 너무 적으면(3개 미만), 기본 조항(앞쪽 30개) 가져옴 (Fallback)
+    if len(filtered_articles) < 3:
+        for a in detail_root.findall(".//조문")[:30]:
+            num = a.find('조문번호').text or ""
+            cont = a.find('조문내용').text or ""
+            filtered_articles.append(f"[제{num}조] {cont}")
+        
+    return filtered_articles
 
 def search_candidates_from_api(keywords):
     """[Action] 키워드로 API를 실제 검색하여 실존 법령명 후보 확보"""
     candidates = set()
     for kw in keywords:
-        if not kw or len(kw) < 2: continue # 너무 짧은 키워드 무시
+        if not kw or len(kw) < 2: continue
         try:
             url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={kw}&display=3"
             res = requests.get(url, timeout=3)
@@ -124,107 +171,70 @@ def search_candidates_from_api(keywords):
     return list(candidates)
 
 def get_law_context_advanced(situation, callback):
-    """
-    [Reasoning -> Action -> Selection] + [Fail-Safe Strategy]
-    Llama가 멍청하게 굴어도 코드로 보정하여 반드시 법령을 찾아내는 로직
-    """
+    """[Reasoning -> Action -> Selection -> Filtering]"""
     callback(10, "🤔 법률 쟁점 분석 및 키워드 추출 중...")
     
     # 1. [Reasoning] JSON 포맷 강제
     prompt_kw = f"""
     상황: {situation}
-    
-    위 상황과 관련된 대한민국 법령 검색용 '핵심 키워드' 3~4개를 추출해.
-    1. 구체적 키워드 (예: 전동킥보드, 층간소음)
-    2. 포괄적 키워드 (예: 공동주택관리법, 도로교통법, 경범죄처벌법)
-    
-    반드시 아래 JSON 형식으로만 출력해. 설명 금지.
-    {{
-        "keywords": ["단어1", "단어2", "단어3"]
-    }}
+    관련 법령 검색을 위한 키워드 3개를 JSON으로 추출해.
+    {{ "keywords": ["단어1", "단어2", "단어3"] }}
     """
-    
     keywords_json, model_src = generate_content_hybrid(prompt_kw)
     
-    # [Parsing] JSON 파싱 및 정제
     try:
-        # JSON 부분만 추출 (Backtick 제거)
         json_match = re.search(r'\{.*\}', keywords_json, re.DOTALL)
         if json_match:
-            json_str = json_match.group()
-            keywords = json.loads(json_str).get("keywords", [])
+            keywords = json.loads(json_match.group()).get("keywords", [])
         else:
-            raise ValueError("No JSON found")
+            keywords = re.findall(r'[가-힣]+', keywords_json)
+            keywords = [k for k in keywords if len(k) > 1][:3]
     except:
-        # 파싱 실패 시 정규식으로 한글 단어만 강제 추출 (비상 조치)
-        keywords = re.findall(r'[가-힣]+', keywords_json)
-        keywords = [k for k in keywords if len(k) > 1 and k != "키워드"]
+        keywords = ["행정", "민원"]
 
-    # 키워드 비었을 때 기본값
-    if not keywords: keywords = ["민법", "행정"]
-    
     callback(30, f"🔎 ({model_src}) 검색어: {', '.join(keywords)}")
     
-    # 2. [Action] 계층적 검색 전략 (Layered Search)
+    # 2. [Action] 법령 검색
     candidates = search_candidates_from_api(keywords)
     
-    # 전략 B: 1차 검색 실패 시 '상황 텍스트' 일부로 광역 검색
+    # 검색 실패 시 광역 검색
     if not candidates:
         callback(40, "⚠️ 정밀 검색 실패. 광역 검색 시도...")
-        broad_keywords = ["공동주택", "집합건물", "도로교통", "경범죄", "민법"]
-        # 상황 텍스트 앞 10글자에서 명사형 추정 단어 추출
-        sim_kw = situation[:15].replace(" ", "")
-        candidates = search_candidates_from_api([sim_kw]) + search_candidates_from_api(broad_keywords)
-        
-    # 전략 C: 최후의 보루 (절대 빈 리스트를 리턴하지 않음)
+        broad_keywords = ["공동주택", "도로교통", "경범죄", "집합건물"]
+        candidates = search_candidates_from_api(broad_keywords)
+    
     if not candidates:
-        candidates = ["민법", "행정절차법", "공동주택관리법"]
+        candidates = ["공동주택관리법", "도로교통법"] # Default
 
     callback(50, f"⚖️ 최적 법령 선별 중... (후보: {len(candidates)}개)")
     
-    # 3. [Selection] AI가 후보 중 최적 법령 선택
-    prompt_sel = f"""
-    [민원 상황] {situation}
-    [검색된 실존 법령 후보] {', '.join(candidates)}
-    
-    위 후보 중 상황에 가장 적합한 법령 1개의 '정확한 이름'만 출력해.
-    """
+    # 3. [Selection] 최적 법령 선택
+    prompt_sel = f"상황: {situation}\n후보: {', '.join(candidates)}\n가장 적합한 법령 1개 이름만 출력."
     best_law_name, _ = generate_content_hybrid(prompt_sel)
     best_law_name = re.sub(r"[\"'\[\]]", "", best_law_name).strip()
     
-    # 후보군 매칭 (AI 환각 방지)
     final_name = next((cand for cand in candidates if cand in best_law_name), candidates[0])
     
-    callback(70, f"📜 '{final_name}' 상세 조문 추출 중...")
+    callback(70, f"📜 '{final_name}' 데이터 정밀 분석 및 필터링 중...")
     
-    # 4. [Retrieval] 상세 조문 가져오기
+    # 4. [Retrieval + Smart Filtering]
     try:
         search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={final_name}"
         root = ET.fromstring(requests.get(search_url, timeout=5).content)
+        mst = root.find(".//MST").text
         
-        # 정확도 보정을 위해 첫 번째 결과의 ID 사용
-        try:
-            mst = root.find(".//MST").text
-        except:
-             return final_name, "법령 상세 정보를 가져오는데 실패했습니다. (API 연동 오류)"
-
         detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst}&type=XML"
-        detail_root = ET.fromstring(requests.get(detail_url, timeout=8).content)
+        detail_res = requests.get(detail_url, timeout=10)
+        detail_root = ET.fromstring(detail_res.content)
         
-        articles = []
-        for a in detail_root.findall(".//조문")[:100]: # 조문 100개
-            num = a.find('조문번호').text or ""
-            cont = a.find('조문내용').text or ""
-            sub_clauses = []
-            for sub in a.findall(".//항"):
-                s_num = sub.find('항번호').text or ""
-                s_cont = sub.find('항내용').text or ""
-                sub_clauses.append(f"  ({s_num}) {s_cont}")
-            articles.append(f"[제{num}조] {cont}\n" + "\n".join(sub_clauses))
-            
+        # [Google Engineer's Touch] 스마트 필터링 적용
+        articles = get_relevant_articles(detail_root, situation)
+        
         return final_name, "\n".join(articles)
+        
     except Exception as e:
-        return final_name, f"시스템 오류로 조문을 가져오지 못했습니다: {e}"
+        # [Fallback] API가 터져도 AI 지식으로 답변하게 유도 (빈 리턴 방지)
+        return final_name, f"(시스템 데이터 로드 오류: {e}). 하지만 당신의 법률 지식을 총동원하여 답변하세요."
 
 # --- 4. 검색 및 보고서 작성 ---
 
@@ -239,34 +249,26 @@ def get_search_results(situation, callback):
     except: return "(검색 결과 없음)"
 
 def generate_final_report(situation, law_name, law_text, search_text, callback):
-    """최종 보고서 작성"""
+    """최종 보고서 작성 (AI 지식 활용 허용)"""
     
     prompt = f"""
-    당신은 20년 경력의 행정 전문관입니다. 
-    반드시 아래 제공된 [관련 법령 데이터]를 근거로 답변해야 하며, 없는 내용을 지어내면 안 됩니다.
+    당신은 대한민국 최고의 행정법 전문 변호사입니다.
     
     [민원 내용] {situation}
-    
     [적용 법령: {law_name}]
-    {law_text}
     
-    [참고 판례]
-    {search_text}
+    [법령 데이터 Context]
+    {law_text[:15000]} 
     
-    ---
-    위 정보를 바탕으로 전문적인 마크다운 보고서를 작성하세요.
+    [지시사항]
+    1. 위 [법령 데이터 Context]에 관련 조항이 있다면 반드시 인용하세요.
+    2. **중요:** 만약 Context에 딱 맞는 조항이 없거나 데이터가 부족하다면, "데이터 없음"이라고 답하지 말고 **당신이 알고 있는 '{law_name}'의 일반적인 법리와 판례 지식을 총동원하여** 가장 실질적인 답변을 작성하세요.
+    3. 민원인에게 도움이 되는 구체적인 해결책(신고처, 내용증명, 관리규약 확인 등)을 제시하세요.
     
     ## 💡 핵심 요약
-    (3줄 요약)
-    
-    ## 📜 법적 검토
-    (가장 중요: 위 법령 데이터의 '제O조 제O항'을 구체적으로 인용하여 적법/위법 여부를 논리적으로 서술)
-    
-    ## 👣 조치 계획
-    (민원인이 밟아야 할 행정 절차 및 대응 방안)
-    
+    ## 📜 법적 검토 (조항 인용 또는 법리 해석)
+    ## 👣 조치 계획 (현실적 대안)
     ## 📄 답변 초안
-    (민원인에게 보낼 정중하고 명확한 답변 메시지)
     """
     
     callback(90, "🧠 심층 분석 및 보고서 작성 중...")
@@ -300,7 +302,7 @@ if btn and user_input:
         status_text.caption(f"{t}")
         time.sleep(0.1)
 
-    # 1. 정밀 법령 탐색 (Tenbagger Logic)
+    # 1. 정밀 법령 탐색 (Advanced Logic)
     law_name, law_text = get_law_context_advanced(user_input, update_status)
     
     # 2. 판례 검색
