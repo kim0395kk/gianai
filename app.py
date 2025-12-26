@@ -6,8 +6,7 @@ from serpapi import GoogleSearch
 import re
 import time
 from supabase import create_client
-from google.api_core.exceptions import ResourceExhausted
-from groq import Groq  # Groq 라이브러리
+from groq import Groq 
 
 # --- 0. 디자인 시스템 & 설정 ---
 st.set_page_config(layout="wide", page_title="AI 행정관: The Legal Glass", page_icon="⚖️")
@@ -63,37 +62,28 @@ except Exception as e:
 
 # 모델 상수 정의
 GROQ_MODEL = "llama-3.3-70b-versatile"
+# [수정] 2.5 버전 등 불안정한 모델을 피하고 1.5 Flash로 고정
+GEMINI_MODEL_NAME = "gemini-1.5-flash" 
 
-@st.cache_data
-def get_best_gemini_model():
-    """Gemini 모델 중 사용 가능한 최적 모델 자동 선택"""
-    try:
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # 1. Flash (빠름/무료)
-        for m in models:
-            if 'gemini-1.5-flash' in m: return m
-        # 2. Pro (고성능)
-        for m in models:
-            if 'gemini-1.5-pro' in m: return m
-        return models[0] if models else 'models/gemini-pro'
-    except:
-        return 'models/gemini-pro'
-
-GEMINI_MODEL_NAME = get_best_gemini_model()
-
-# --- 2. 핵심 엔진: 하이브리드 생성기 ---
+# --- 2. 핵심 엔진: 하이브리드 생성기 (강력한 예외처리) ---
 def generate_content_hybrid(prompt, temp=0.7):
     """
-    [핵심] Gemini 시도 -> 실패(Quota) 시 -> Groq 전환
+    [핵심] Gemini 시도 -> 실패 시(어떤 에러든) -> Groq 전환
     Returns: (text, source_name)
     """
     # 1. Gemini 시도
     try:
         model = genai.GenerativeModel(GEMINI_MODEL_NAME)
-        res = model.generate_content(prompt)
+        # Gemini는 timeout을 짧게 주어 빨리 실패하게 함 (5초)
+        res = model.generate_content(prompt, request_options={'timeout': 8})
         return res.text, "Gemini"
-    except ResourceExhausted:
-        # 2. Groq 시도 (Gemini 용량 초과 시)
+        
+    except Exception as e:
+        # [중요] 429 에러 뿐만 아니라 모든 에러(Exception) 발생 시 Groq로 전환
+        error_msg = str(e)
+        print(f"Gemini Error: {error_msg}") # 로그 확인용
+
+        # 2. Groq 시도
         if groq_client:
             try:
                 chat_completion = groq_client.chat.completions.create(
@@ -102,12 +92,10 @@ def generate_content_hybrid(prompt, temp=0.7):
                     temperature=temp,
                 )
                 return chat_completion.choices[0].message.content, "Groq"
-            except Exception as e:
-                return f"Groq 전환 실패: {e}", "Error"
+            except Exception as groq_e:
+                return f"Groq 전환 실패: {groq_e}", "Error"
         else:
-            return "Gemini 용량 초과 (Groq 키 없음)", "Error"
-    except Exception as e:
-        return f"Gemini 기타 에러: {e}", "Error"
+            return f"Gemini 오류(Quota 등) 발생 & Groq 키 없음. 에러: {error_msg}", "Error"
 
 # --- 3. 비즈니스 로직 ---
 
@@ -115,7 +103,6 @@ def get_law_context(situation, callback):
     """[1단계] 상황에 맞는 법령명 식별"""
     callback(10, "📜 관련 법령 식별 중...")
     
-    # 단순 식별에도 하이브리드 엔진을 사용하여 안정성 확보
     prompt = f"상황: {situation}\n가장 관련성 높은 대한민국 법령명 1개만 정확히 출력해 (예: 도로교통법). 부가 설명 절대 금지."
     law_name_raw, source = generate_content_hybrid(prompt)
     
@@ -135,7 +122,8 @@ def get_law_context(situation, callback):
             mst = root.find(".//법령일련번호").text
             real_name = root.find(".//법령명한글").text
         except:
-            return law_name, "(법령 상세 내용을 가져오지 못했습니다)"
+            # 검색 안되면 그냥 원본 이름 리턴
+            return law_name, ""
 
         # 상세 조문 조회
         detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst}&type=XML"
@@ -195,7 +183,7 @@ def generate_final_report(situation, law_name, law_text, search_text, callback):
     res_text, source = generate_content_hybrid(prompt)
     
     if source == "Error":
-        # 최후의 재시도
+        # 최후의 재시도 (Groq 한 번 더)
         time.sleep(1)
         res_text, source = generate_content_hybrid(prompt)
         if source == "Error":
@@ -230,7 +218,7 @@ if btn and user_input:
     def update_status(p, t):
         progress_bar.progress(p)
         status_text.caption(f"{t}")
-        time.sleep(0.1) # UI 업데이트 시각적 효과
+        time.sleep(0.1)
 
     # 1. 법령 식별 및 조회
     law_name, law_text = get_law_context(user_input, update_status)
@@ -249,9 +237,9 @@ if btn and user_input:
     
     # 엔진 사용 알림
     if used_source == "Groq":
-        st.warning("⚡ 구글 Gemini 접속량 폭주로 **Backup AI (Llama 3.3)**가 답변했습니다.", icon="⚡")
+        st.warning("⚡ Gemini 사용량 초과로 **Backup AI (Llama 3.3)**가 답변했습니다.", icon="⚡")
     elif used_source == "Fail":
-        st.error("모든 AI 모델 연결에 실패했습니다.")
+        st.error(f"모든 AI 모델 연결에 실패했습니다.\n{final_text}")
     else:
         st.success(f"✨ **Gemini**가 정상적으로 분석했습니다.", icon="🤖")
 
