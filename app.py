@@ -6,9 +6,10 @@ from serpapi import GoogleSearch
 import re
 import time
 from supabase import create_client
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, InternalServerError, NotFound
+from google.api_core.exceptions import ResourceExhausted
+from groq import Groq  # Groq 라이브러리
 
-# --- 0. 디자인 시스템 ---
+# --- 0. 디자인 시스템 & 설정 ---
 st.set_page_config(layout="wide", page_title="AI 행정관: The Legal Glass", page_icon="⚖️")
 
 st.markdown("""
@@ -26,204 +27,249 @@ st.markdown("""
     h1, h2, h3 { color: #1a237e !important; font-family: 'Helvetica Neue', sans-serif; }
     strong { color: #1a237e; background-color: rgba(26, 35, 126, 0.05); padding: 2px 4px; border-radius: 4px; }
     .status-badge { background-color: #dbeafe; color: #1e40af; padding: 4px 8px; border-radius: 6px; font-size: 0.8rem; font-weight: bold; }
+    .groq-badge { background-color: #fce7f3; color: #9d174d; padding: 4px 8px; border-radius: 6px; font-size: 0.8rem; font-weight: bold; border: 1px solid #fbcfe8; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. 초기화 ---
+# --- 1. API 및 클라이언트 초기화 ---
 try:
+    # Secrets 로드
     GEMINI_API_KEY = st.secrets["general"]["GEMINI_API_KEY"]
     LAW_API_ID = st.secrets["general"]["LAW_API_ID"]
     SERPAPI_KEY = st.secrets["general"]["SERPAPI_KEY"]
-    
+    GROQ_API_KEY = st.secrets["general"].get("GROQ_API_KEY", None)
+
+    # Supabase (선택 사항)
     try:
         SUPABASE_URL = st.secrets["supabase"]["SUPABASE_URL"]
         SUPABASE_KEY = st.secrets["supabase"]["SUPABASE_KEY"]
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
         use_db = True
-    except: use_db = False
+    except: 
+        use_db = False
 
+    # Gemini 설정
     genai.configure(api_key=GEMINI_API_KEY)
+    
+    # Groq 설정
+    if GROQ_API_KEY:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+    else:
+        groq_client = None
+
 except Exception as e:
     st.error(f"🚨 API 키 설정 오류: {e}")
     st.stop()
 
-# [핵심] 사용 가능한 모델을 자동으로 찾아주는 함수 (404 방지)
+# 모델 상수 정의
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
 @st.cache_data
-def get_best_model():
+def get_best_gemini_model():
+    """Gemini 모델 중 사용 가능한 최적 모델 자동 선택"""
     try:
-        # 내 키로 쓸 수 있는 모델 리스트를 서버에 물어봄
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # 1순위: 1.5 Flash (빠르고 무료량 많음)
+        # 1. Flash (빠름/무료)
         for m in models:
             if 'gemini-1.5-flash' in m: return m
-            
-        # 2순위: 1.5 Pro
+        # 2. Pro (고성능)
         for m in models:
             if 'gemini-1.5-pro' in m: return m
-            
-        # 3순위: 아무거나 되는 거 (Gemini Pro 등)
         return models[0] if models else 'models/gemini-pro'
     except:
-        # 목록 조회 실패 시 가장 기본 모델로 강제 지정
         return 'models/gemini-pro'
 
-MODEL_NAME = get_best_model()
+GEMINI_MODEL_NAME = get_best_gemini_model()
 
-# --- 2. 로직 엔진 ---
+# --- 2. 핵심 엔진: 하이브리드 생성기 ---
+def generate_content_hybrid(prompt, temp=0.7):
+    """
+    [핵심] Gemini 시도 -> 실패(Quota) 시 -> Groq 전환
+    Returns: (text, source_name)
+    """
+    # 1. Gemini 시도
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+        res = model.generate_content(prompt)
+        return res.text, "Gemini"
+    except ResourceExhausted:
+        # 2. Groq 시도 (Gemini 용량 초과 시)
+        if groq_client:
+            try:
+                chat_completion = groq_client.chat.completions.create(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=GROQ_MODEL,
+                    temperature=temp,
+                )
+                return chat_completion.choices[0].message.content, "Groq"
+            except Exception as e:
+                return f"Groq 전환 실패: {e}", "Error"
+        else:
+            return "Gemini 용량 초과 (Groq 키 없음)", "Error"
+    except Exception as e:
+        return f"Gemini 기타 에러: {e}", "Error"
+
+# --- 3. 비즈니스 로직 ---
 
 def get_law_context(situation, callback):
-    """[엔진 1] 법령 API"""
-    callback(10, "📜 법령 식별 중...")
-    model = genai.GenerativeModel(MODEL_NAME)
-    try:
-        res = model.generate_content(f"상황: {situation}\n관련 법령명 1개만 출력 (예: 도로교통법)").text
-        law_name = re.sub(r'[^가-힣]', '', res)
-    except: return "식별 실패", ""
+    """[1단계] 상황에 맞는 법령명 식별"""
+    callback(10, "📜 관련 법령 식별 중...")
+    
+    # 단순 식별에도 하이브리드 엔진을 사용하여 안정성 확보
+    prompt = f"상황: {situation}\n가장 관련성 높은 대한민국 법령명 1개만 정확히 출력해 (예: 도로교통법). 부가 설명 절대 금지."
+    law_name_raw, source = generate_content_hybrid(prompt)
+    
+    if source == "Error": return "식별 실패", ""
+    
+    law_name = re.sub(r'[^가-힣]', '', law_name_raw) # 한글만 남김
+    
+    callback(30, f"🏛️ '{law_name}' 조회 중... ({source} 엔진)")
 
-    callback(30, f"🏛️ '{law_name}' 조회 중...")
+    # 법령 API 조회 (국가법령정보센터)
     try:
         search_url = f"https://www.law.go.kr/DRF/lawSearch.do?OC={LAW_API_ID}&target=law&type=XML&query={law_name}"
-        root = ET.fromstring(requests.get(search_url, timeout=3).content)
-        mst = root.find(".//법령일련번호").text
-        real_name = root.find(".//법령명한글").text
+        root = ET.fromstring(requests.get(search_url, timeout=5).content)
         
+        # 검색 결과 파싱
+        try:
+            mst = root.find(".//법령일련번호").text
+            real_name = root.find(".//법령명한글").text
+        except:
+            return law_name, "(법령 상세 내용을 가져오지 못했습니다)"
+
+        # 상세 조문 조회
         detail_url = f"https://www.law.go.kr/DRF/lawService.do?OC={LAW_API_ID}&target=law&MST={mst}&type=XML"
         detail_root = ET.fromstring(requests.get(detail_url, timeout=5).content)
         
         articles = []
-        # [안전장치] 10개 제한
-        for a in detail_root.findall(".//조문")[:10]: 
+        for a in detail_root.findall(".//조문")[:10]: # 최대 10개 조문만
             num = a.find('조문번호').text or ""
             cont = a.find('조문내용').text or ""
             articles.append(f"[제{num}조] {cont}")
             
-        callback(50, f"✅ 법령 데이터 확보.")
+        callback(50, f"✅ 법령 데이터 확보 완료")
         return real_name, "\n".join(articles)
-    except:
+    except Exception as e:
         return law_name, ""
 
 def get_search_results(situation, callback):
-    """[엔진 2] 구글 서치"""
-    callback(60, "🔍 사례 검색 중...")
+    """[2단계] 유사 사례 검색"""
+    callback(60, "🔍 유사 행정 사례 검색 중...")
     try:
-        params = {"engine": "google", "q": f"{situation} 행정처분 사례", "api_key": SERPAPI_KEY, "num": 3}
+        params = {"engine": "google", "q": f"{situation} 행정처분 사례 판례", "api_key": SERPAPI_KEY, "num": 3}
         search = GoogleSearch(params)
         results = search.get_dict().get("organic_results", [])
         snippets = [f"- {item['title']}: {item['snippet']}" for item in results]
         return "\n".join(snippets)
     except:
-        return ""
+        return "(검색 결과 없음)"
 
-def generate_report_safe(situation, law_name, law_text, search_text, callback):
-    """[엔진 3] 과부하/에러 방지 스마트 로직"""
-    model = genai.GenerativeModel(MODEL_NAME)
+def generate_final_report(situation, law_name, law_text, search_text, callback):
+    """[3단계] 최종 보고서 작성"""
     
-    # 입력 데이터 다이어트
-    if len(law_text) > 3000:
-        law_text = law_text[:3000] + "...(생략)"
+    # 프롬프트 구성
+    prompt = f"""
+    당신은 대한민국 최고의 행정 전문관입니다.
+    아래 정보를 바탕으로 민원인에게 제공할 전문적인 보고서를 마크다운 형식으로 작성하세요.
     
-    # 1. 표준 모드 프롬프트
-    prompt_std = f"""
-    당신은 행정관입니다. 마크다운 보고서를 작성하세요.
-    [민원] {situation}
-    [법령] {law_name}\n{law_text}
-    [사례] {search_text}
+    [민원 내용] {situation}
+    [관련 법령] {law_name}\n{law_text[:3000]} 
+    [참고 사례] {search_text}
     
     ## 💡 핵심 요약
+    (3줄 이내 요약)
+    
     ## 📜 법적 검토
-    ## 🔍 유사 사례
-    ## 👣 조치 계획
-    ## 📄 답변 초안
-    """
-
-    # 2. 비상 모드 프롬프트
-    prompt_lite = f"""
-    [비상모드] 데이터 부족으로 당신의 지식으로 답변합니다.
-    [민원] {situation}
-    [관련법] {law_name}
+    (법적 근거와 판단)
     
-    ## 💡 핵심 요약
-    ## 📜 법적 검토 (AI 지식)
     ## 👣 조치 계획
+    (구체적 해결 방안)
+    
     ## 📄 답변 초안
+    (민원인용 답변 텍스트)
     """
-
-    # 1차 시도
-    callback(80, "🧠 [1차] 정밀 분석 시도...")
-    try:
-        res = model.generate_content(prompt_std)
-        callback(100, "🎉 분석 완료!")
-        return res.text
-    except Exception as e:
-        print(f"1차 에러: {e}")
-
-    # 2차 시도 (대기 후 경량화)
-    for i in range(3, 0, -1):
-        callback(85, f"⚠️ 연결 재시도 중... {i}초")
+    
+    callback(80, "🧠 AI 분석 및 보고서 작성 중...")
+    
+    # 하이브리드 엔진 호출
+    res_text, source = generate_content_hybrid(prompt)
+    
+    if source == "Error":
+        # 최후의 재시도
         time.sleep(1)
-        
-    callback(90, "🚀 [2차] 비상 모드로 전환...")
-    try:
-        res = model.generate_content(prompt_lite)
-        return res.text + "\n\n*(서버 문제로 비상 모드로 작성되었습니다)*"
-    except Exception as e:
-        return f"죄송합니다. AI 모델 연결에 실패했습니다.\n사용 중인 모델: {MODEL_NAME}\n에러 메시지: {e}"
+        res_text, source = generate_content_hybrid(prompt)
+        if source == "Error":
+            return f"죄송합니다. 시스템 접속 폭주로 분석에 실패했습니다.\n오류 내용: {res_text}", "Fail"
 
-# --- 3. UI 실행 ---
+    callback(100, "🎉 분석 완료!")
+    return res_text, source
+
+# --- 4. UI 실행 ---
 
 st.markdown(f"""
 <div style="text-align:center; padding: 20px; background: rgba(255,255,255,0.6); border-radius: 20px; border: 1px solid rgba(255,255,255,0.4);">
     <h1 style="color:#1a237e;">⚖️ AI 행정관: The Legal Glass</h1>
-    <span class="status-badge">Connected: {MODEL_NAME}</span>
+    <div style="margin-top: 10px;">
+        <span class="status-badge">Main: {GEMINI_MODEL_NAME}</span>
+        <span class="groq-badge">Backup: Llama-3.3 (Groq)</span>
+    </div>
 </div>
 <br>
 """, unsafe_allow_html=True)
 
 with st.container():
     st.markdown('<div style="background-color:rgba(0,0,0,0);"></div>', unsafe_allow_html=True)
-    user_input = st.text_area("민원 상황 입력", height=100, placeholder="예: 아파트 단지 내 킥보드 강제 수거 가능 여부")
+    user_input = st.text_area("민원 상황 입력", height=100, placeholder="예: 층간소음으로 인한 이웃 분쟁 조정 절차가 궁금합니다.")
     btn = st.button("🚀 분석 시작", use_container_width=True, type="primary")
 
 if btn and user_input:
+    # 프로그레스 바 설정
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    def update(p, t):
+    def update_status(p, t):
         progress_bar.progress(p)
         status_text.caption(f"{t}")
-        time.sleep(0.05)
+        time.sleep(0.1) # UI 업데이트 시각적 효과
 
-    # 1. 법령
-    law_name, law_text = get_law_context(user_input, update)
-    time.sleep(1) 
+    # 1. 법령 식별 및 조회
+    law_name, law_text = get_law_context(user_input, update_status)
     
     # 2. 검색
-    search_text = get_search_results(user_input, update)
-    time.sleep(1) 
+    search_text = get_search_results(user_input, update_status)
     
-    # 3. 분석
-    final_text = generate_report_safe(user_input, law_name, law_text, search_text, update)
+    # 3. 최종 보고서 작성
+    final_text, used_source = generate_final_report(user_input, law_name, law_text, search_text, update_status)
     
+    # 완료 처리
     progress_bar.empty()
     status_text.empty()
     
-    # 결과 출력
     st.divider()
-    sections = re.split(r'(?=## )', final_text)
     
+    # 엔진 사용 알림
+    if used_source == "Groq":
+        st.warning("⚡ 구글 Gemini 접속량 폭주로 **Backup AI (Llama 3.3)**가 답변했습니다.", icon="⚡")
+    elif used_source == "Fail":
+        st.error("모든 AI 모델 연결에 실패했습니다.")
+    else:
+        st.success(f"✨ **Gemini**가 정상적으로 분석했습니다.", icon="🤖")
+
+    # 결과 렌더링
+    sections = re.split(r'(?=## )', final_text)
     for section in sections:
         if not section.strip(): continue
         with st.container():
-            st.markdown('<div style="background-color:rgba(0,0,0,0);"></div>', unsafe_allow_html=True)
             st.markdown(section)
 
-    if use_db:
+    # DB 저장
+    if use_db and used_source != "Fail":
         try:
             supabase.table("law_reports").insert({
                 "situation": user_input,
                 "law_name": law_name,
-                "summary": final_text[:500]
+                "summary": final_text[:500],
+                "ai_model": used_source
             }).execute()
-            st.toast("저장 완료", icon="💾")
+            st.toast("기록이 저장되었습니다.", icon="💾")
         except: pass
