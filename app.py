@@ -388,12 +388,13 @@ def run_workflow(user_input):
 # ==========================================
 # 5. Presentation Layer (UI)
 # ==========================================
+import textwrap 
+
 def main():
-    # 1. 화면을 좌우로 나눕니다.
     col_left, col_right = st.columns([1, 1.2])
 
     # ====================================================
-    # [왼쪽 컬럼] 입력창 + (안 사라지는) 법령/전략 결과
+    # [왼쪽] 입력 및 결과 (법령 안 사라짐)
     # ====================================================
     with col_left:
         st.title("🏢 AI 행정관 Pro")
@@ -401,38 +402,31 @@ def main():
         
         user_input = st.text_area("업무 지시", height=150, placeholder="예: 무단투기 과태료 부과 통지서 작성")
         
-        # [실행 버튼]
+        # [버튼 클릭 시] 세션에 결과 저장
         if st.button("⚡ 업무 시작", type="primary", use_container_width=True):
             if user_input:
                 try:
                     with st.spinner("AI 에이전트가 협업 중입니다..."):
-                        # [핵심 1] 결과를 세션(임시저장소)에 '박제'합니다.
-                        # 이렇게 해야 화면이 새로고침 되어도 데이터가 날아가지 않습니다.
                         st.session_state['workflow_result'] = run_workflow(user_input)
                 except Exception as e: st.error(f"오류: {e}")
 
-        # [핵심 2] 버튼 밖에서 "세션에 데이터가 있는지" 확인하고 그립니다.
-        # 이렇게 하면 버튼을 안 눌러도 결과가 화면에 계속 남아있습니다.
+        # [상태 유지] 세션에 데이터가 있으면 무조건 표시
         if 'workflow_result' in st.session_state:
             res = st.session_state['workflow_result']
             
             st.markdown("---")
-            
-            # (1) DB 저장 결과 메시지
             if "성공" in res.get('save_msg', ''): st.success(f"✅ {res['save_msg']}")
             else: st.error(f"❌ {res.get('save_msg')}")
 
-            # (2) 법령 및 리서치 결과 (여기가 안 사라지게 하는 부분!)
             with st.expander("✅ [검토] 법령 및 근거 상세", expanded=True):
                 st.code(res.get('law', ''), language="text")
                 st.info(f"🔎 판례: {res.get('search', '')}")
 
-            # (3) 전략 가이드라인
             with st.expander("🧭 [방향] 처리 가이드라인", expanded=True):
                 st.markdown(res.get('strategy', ''))
 
     # ====================================================
-    # [오른쪽 컬럼] (안 사라지는) 공문서 미리보기
+    # [오른쪽] 공문서 미리보기 (깨짐 해결됨)
     # ====================================================
     with col_right:
         if 'workflow_result' in st.session_state:
@@ -441,32 +435,32 @@ def main():
             meta = res.get('meta')
             
             if doc:
-                # HTML 들여쓰기 문제 해결 (왼쪽 벽에 붙이기)
-                # 본문 문단을 <p> 태그로 변환
+                # 1. 본문 문단 HTML 변환
                 paragraphs = doc.get('body_paragraphs', [])
                 if isinstance(paragraphs, str): paragraphs = [paragraphs]
                 p_html = "".join([f"<p style='margin-bottom: 15px;'>{p}</p>" for p in paragraphs])
 
-                # [중요] f-string 시작부터 들여쓰기 없이 작성
-                html_content = f"""
-<div class="paper-sheet">
-<div class="stamp">직인생략</div>
-<div class="doc-header">{doc.get('title', '공 문 서')}</div>
-<div class="doc-info">
-<span>문서번호: {meta.get('doc_num', '')}</span>
-<span>시행일자: {meta.get('today_str', '')}</span>
-<span>수신: {doc.get('receiver', '참조')}</span>
-</div>
-<hr style="border: 1px solid black; margin-bottom: 30px;">
-<div class="doc-body">
-{p_html}
-</div>
-<div class="doc-footer">{doc.get('department_head', '행정기관장')}</div>
-</div>
-"""
+                # 2. [핵심 해결] textwrap.dedent를 사용하여 숨어있는 들여쓰기를 강제로 제거
+                # 이렇게 하면 코드에서 보기 좋게 들여쓰기를 해도, 실제로는 왼쪽 벽에 딱 붙어서 나옵니다.
+                html_content = textwrap.dedent(f"""
+                    <div class="paper-sheet">
+                        <div class="stamp">직인생략</div>
+                        <div class="doc-header">{doc.get('title', '공 문 서')}</div>
+                        <div class="doc-info">
+                            <span>문서번호: {meta.get('doc_num', '')}</span>
+                            <span>시행일자: {meta.get('today_str', '')}</span>
+                            <span>수신: {doc.get('receiver', '참조')}</span>
+                        </div>
+                        <hr style="border: 1px solid black; margin-bottom: 30px;">
+                        <div class="doc-body">
+                            {p_html}
+                        </div>
+                        <div class="doc-footer">{doc.get('department_head', '행정기관장')}</div>
+                    </div>
+                """).strip()
+
                 st.markdown(html_content, unsafe_allow_html=True)
                 
-                # 다운로드 버튼
                 st.download_button(
                     label="🖨️ 다운로드 (HTML)",
                     data=html_content,
@@ -475,7 +469,6 @@ def main():
                     use_container_width=True
                 )
         else:
-            # 결과가 없을 때 대기 화면
             st.markdown("""
             <div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'>
                 <h3>📄 Document Preview</h3>
