@@ -389,89 +389,99 @@ def run_workflow(user_input):
 # 5. Presentation Layer (UI)
 # ==========================================
 def main():
+    # 1. 화면을 좌우로 나눕니다.
     col_left, col_right = st.columns([1, 1.2])
 
+    # ====================================================
+    # [왼쪽 컬럼] 입력창 + (안 사라지는) 법령/전략 결과
+    # ====================================================
     with col_left:
         st.title("🏢 AI 행정관 Pro")
-        st.caption("Gemini + Search + Strategy + DB")
         st.markdown("---")
         
-        st.markdown("### 🗣️ 업무 지시")
-        user_input = st.text_area(
-            "업무 내용",
-            height=150,
-            placeholder="예시:\n- 아파트 단지 내 소방차 전용구역 불법 주차 차량 과태료 부과 예고 통지서 작성해줘.",
-            label_visibility="collapsed"
-        )
+        user_input = st.text_area("업무 지시", height=150, placeholder="예: 무단투기 과태료 부과 통지서 작성")
         
-        if st.button("⚡ 스마트 행정 시작", type="primary", use_container_width=True):
-            if not user_input:
-                st.warning("내용을 입력해주세요.")
-            else:
+        # [실행 버튼]
+        if st.button("⚡ 업무 시작", type="primary", use_container_width=True):
+            if user_input:
                 try:
-                    with st.spinner("AI 에이전트 팀이 협업 중입니다..."):
-                        # [핵심] 결과를 세션에 저장하여 '박제' (사라짐 방지)
+                    with st.spinner("AI 에이전트가 협업 중입니다..."):
+                        # [핵심 1] 결과를 세션(임시저장소)에 '박제'합니다.
+                        # 이렇게 해야 화면이 새로고침 되어도 데이터가 날아가지 않습니다.
                         st.session_state['workflow_result'] = run_workflow(user_input)
-                except Exception as e:
-                    st.error(f"시스템 오류 발생: {e}")
+                except Exception as e: st.error(f"오류: {e}")
 
-# [상태 유지] 세션에 데이터가 있으면 무조건 렌더링
+        # [핵심 2] 버튼 밖에서 "세션에 데이터가 있는지" 확인하고 그립니다.
+        # 이렇게 하면 버튼을 안 눌러도 결과가 화면에 계속 남아있습니다.
         if 'workflow_result' in st.session_state:
             res = st.session_state['workflow_result']
             
             st.markdown("---")
             
-            # 1. DB 저장 결과
-            if "성공" in res['save_msg']:
-                st.success(f"✅ {res['save_msg']}")
-            else:
-                st.error(f"❌ {res['save_msg']}")
+            # (1) DB 저장 결과 메시지
+            if "성공" in res.get('save_msg', ''): st.success(f"✅ {res['save_msg']}")
+            else: st.error(f"❌ {res.get('save_msg')}")
 
-            # 2. 법령 검토 결과
-            with st.expander("✅ [검토] 법령 및 유사 사례 확인", expanded=True):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**📜 적용 법령**")
-                    st.code(res['law'], language="text") 
-                with col2:
-                    st.markdown("**🌍 유사 사례**")
-                    st.info(res['search'])
-            
-            # 3. 전략 가이드라인
-            with st.expander("🧭 [방향] 업무 처리 가이드라인", expanded=True):
-                st.markdown(res['strategy'])
+            # (2) 법령 및 리서치 결과 (여기가 안 사라지게 하는 부분!)
+            with st.expander("✅ [검토] 법령 및 근거 상세", expanded=True):
+                st.code(res.get('law', ''), language="text")
+                st.info(f"🔎 판례: {res.get('search', '')}")
 
+            # (3) 전략 가이드라인
+            with st.expander("🧭 [방향] 처리 가이드라인", expanded=True):
+                st.markdown(res.get('strategy', ''))
+
+    # ====================================================
+    # [오른쪽 컬럼] (안 사라지는) 공문서 미리보기
+    # ====================================================
     with col_right:
         if 'workflow_result' in st.session_state:
             res = st.session_state['workflow_result']
-            doc = res['doc']
-            meta = res['meta']
+            doc = res.get('doc')
+            meta = res.get('meta')
             
             if doc:
-                html_content = f"""
-                <div class="paper-sheet">
-                    <div class="stamp">직인생략</div>
-                    <div class="doc-header">{doc.get('title', '공 문 서')}</div>
-                    <div class="doc-info">
-                        <span>문서번호: {meta['doc_num']}</span>
-                        <span>시행일자: {meta['today_str']}</span>
-                        <span>수신: {doc.get('receiver', '수신자 참조')}</span>
-                    </div>
-                    <hr style="border: 1px solid black; margin-bottom: 30px;">
-                    <div class="doc-body">
-                """
+                # HTML 들여쓰기 문제 해결 (왼쪽 벽에 붙이기)
+                # 본문 문단을 <p> 태그로 변환
                 paragraphs = doc.get('body_paragraphs', [])
                 if isinstance(paragraphs, str): paragraphs = [paragraphs]
-                for p in paragraphs:
-                    html_content += f"<p style='margin-bottom: 15px;'>{p}</p>"
-                html_content += f"""
-                    </div>
-                    <div class="doc-footer">{doc.get('department_head', '행정기관장')}</div>
-                </div>
-                """
+                p_html = "".join([f"<p style='margin-bottom: 15px;'>{p}</p>" for p in paragraphs])
+
+                # [중요] f-string 시작부터 들여쓰기 없이 작성
+                html_content = f"""
+<div class="paper-sheet">
+<div class="stamp">직인생략</div>
+<div class="doc-header">{doc.get('title', '공 문 서')}</div>
+<div class="doc-info">
+<span>문서번호: {meta.get('doc_num', '')}</span>
+<span>시행일자: {meta.get('today_str', '')}</span>
+<span>수신: {doc.get('receiver', '참조')}</span>
+</div>
+<hr style="border: 1px solid black; margin-bottom: 30px;">
+<div class="doc-body">
+{p_html}
+</div>
+<div class="doc-footer">{doc.get('department_head', '행정기관장')}</div>
+</div>
+"""
                 st.markdown(html_content, unsafe_allow_html=True)
+                
+                # 다운로드 버튼
+                st.download_button(
+                    label="🖨️ 다운로드 (HTML)",
+                    data=html_content,
+                    file_name="공문서.html",
+                    mime="text/html",
+                    use_container_width=True
+                )
         else:
-            st.markdown("""<div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'><h3>📄 Document Preview</h3><p>왼쪽에서 업무를 지시하면<br>완성된 공문서가 여기에 나타납니다.</p></div>""", unsafe_allow_html=True)
+            # 결과가 없을 때 대기 화면
+            st.markdown("""
+            <div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'>
+                <h3>📄 Document Preview</h3>
+                <p>왼쪽에서 업무를 지시하면<br>완성된 공문서가 여기에 나타납니다.</p>
+            </div>
+            """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
