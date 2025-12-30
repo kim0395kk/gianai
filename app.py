@@ -171,6 +171,7 @@ class DatabaseService:
     """Supabase Persistence Layer"""
     def __init__(self):
         try:
+            # streamlit secrets에 SUPABASE_URL, SUPABASE_KEY가 있어야 합니다.
             self.url = st.secrets["supabase"]["SUPABASE_URL"]
             self.key = st.secrets["supabase"]["SUPABASE_KEY"]
             self.client = create_client(self.url, self.key)
@@ -183,15 +184,26 @@ class DatabaseService:
             return "DB 미연결 (저장 건너뜀)"
             
         try:
-            data = {
-                "input_text": user_input,
-                "legal_basis": legal_basis,
+            # [수정 포인트] SQL 테이블 구조에 맞춰 데이터 매핑
+            # SQL: situation, law_name, summary
+            
+            # summary 컬럼에 '전략'과 '최종 문서 내용'을 합쳐서 JSON 텍스트로 저장합니다.
+            # 그래야 나중에 "AI 요약 내용"으로 활용하기 좋습니다.
+            final_summary_content = {
                 "strategy": strategy,
-                "final_doc": json.dumps(doc_data, ensure_ascii=False),
-                "created_at": datetime.now().isoformat()
+                "document_content": doc_data
             }
-            # 'law_logs' 테이블에 저장 (테이블이 존재해야 함)
-            self.client.table("law_logs").insert(data).execute()
+            
+            data = {
+                "situation": user_input,      # SQL의 situation 컬럼에 대응
+                "law_name": legal_basis,      # SQL의 law_name 컬럼에 대응
+                "summary": json.dumps(final_summary_content, ensure_ascii=False) # SQL의 summary 컬럼에 대응
+                # created_at은 DB에서 자동으로 생성하므로 안 보내도 됩니다.
+            }
+
+            # 테이블 이름을 'law_reports'로 수정
+            self.client.table("law_reports").insert(data).execute()
+            
             return "DB 저장 성공"
         except Exception as e:
             return f"DB 저장 실패: {e}"
