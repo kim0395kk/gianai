@@ -36,7 +36,7 @@ st.markdown("""
     /* 공문서 내부 스타일 */
     .doc-header { text-align: center; font-size: 22pt; font-weight: 900; margin-bottom: 30px; letter-spacing: 2px; }
     .doc-info { display: flex; justify-content: space-between; font-size: 11pt; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
-    .doc-body { font-size: 12pt; text-align: justify; }
+    .doc-body { font-size: 12pt; text-align: justify; white-space: pre-line; }
     .doc-footer { text-align: center; font-size: 20pt; font-weight: bold; margin-top: 80px; letter-spacing: 5px; }
     .stamp { position: absolute; bottom: 85px; right: 80px; border: 3px solid #cc0000; color: #cc0000; padding: 5px 10px; font-size: 14pt; font-weight: bold; transform: rotate(-15deg); opacity: 0.8; border-radius: 5px; }
     
@@ -70,7 +70,7 @@ class LLMService:
         self.gemini_key = st.secrets["general"].get("GEMINI_API_KEY")
         self.groq_key = st.secrets["general"].get("GROQ_API_KEY")
         
-        # 모델 우선순위 리스트
+        # [선생님 요청사항] 모델 리스트 원상복구 (2.5 포함)
         self.gemini_models = [
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
@@ -184,24 +184,18 @@ class DatabaseService:
             return "DB 미연결 (저장 건너뜀)"
             
         try:
-            # [수정 포인트] SQL 테이블 구조에 맞춰 데이터 매핑
-            # SQL: situation, law_name, summary
-            
-            # summary 컬럼에 '전략'과 '최종 문서 내용'을 합쳐서 JSON 텍스트로 저장합니다.
-            # 그래야 나중에 "AI 요약 내용"으로 활용하기 좋습니다.
+            # summary 컬럼에 '전략'과 '최종 문서 내용'을 합쳐서 JSON 텍스트로 저장
             final_summary_content = {
                 "strategy": strategy,
                 "document_content": doc_data
             }
             
             data = {
-                "situation": user_input,      # SQL의 situation 컬럼에 대응
-                "law_name": legal_basis,      # SQL의 law_name 컬럼에 대응
-                "summary": json.dumps(final_summary_content, ensure_ascii=False) # SQL의 summary 컬럼에 대응
-                # created_at은 DB에서 자동으로 생성하므로 안 보내도 됩니다.
+                "situation": user_input,      
+                "law_name": legal_basis,      
+                "summary": json.dumps(final_summary_content, ensure_ascii=False) 
             }
 
-            # 테이블 이름을 'law_reports'로 수정
             self.client.table("law_reports").insert(data).execute()
             
             return "DB 저장 성공"
@@ -320,13 +314,10 @@ class LegalAgents:
         return llm_service.generate_json(prompt, schema=doc_schema)
 
 # ==========================================
-# 4. Application Layer (Workflow)
-# ==========================================
-# ==========================================
-# 4. Workflow (UI 로직 - 완전판)
+# 4. Workflow (UI 로직 - 버그 수정판)
 # ==========================================
 def run_workflow(user_input):
-    # 1. 로그가 출력될 공간 확보 (나중에 여기만 쏙 지울 겁니다)
+    # 1. 로그가 출력될 공간
     log_placeholder = st.empty()
     logs = []
     
@@ -336,72 +327,63 @@ def run_workflow(user_input):
         time.sleep(0.3)
 
     # ----------------------------------------
-    # Phase 1: Fact Check & Research (법령/검색)
+    # Phase 1: Fact Check & Research
     # ----------------------------------------
     add_log("🔍 Phase 1: 법령 및 유사 사례 리서치 중...", "legal")
     
-    # AI가 법령 찾기
-    legal_basis = Agents.researcher(user_input)
+    # [수정] Agents -> LegalAgents (클래스 이름 통일)
+    legal_basis = LegalAgents.researcher(user_input)
     add_log(f"📜 법적 근거 발견 완료", "legal")
     
-    # (선택) 판례 검색 - 서비스가 연결되어 있다면 수행
     add_log("🌍 구글 검색 엔진 가동...", "search")
-    # 검색 서비스가 있으면 돌리고, 없으면 없다고 표시 (에러 방지)
     try:
         search_results = search_service.search_precedents(user_input)
     except:
         search_results = "검색 모듈 미연결 (건너뜀)"
     
-    # [UI] 법령 검토 결과 보여주기 (로그가 사라져도 이건 남음!)
-    with st.expander("✅ [검토] 법령 및 유사 사례 확인", expanded=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**📜 적용 법령 (Code)**")
-            # 선생님이 원하신 '고딕체' 박스
-            st.code(legal_basis, language="text") 
-        with col2:
-            st.markdown("**🌍 유사 사례**")
-            st.info(search_results)
-
     # ----------------------------------------
-    # Phase 2: Strategy Setup (전략 수립 - 복구됨!)
+    # Phase 2: Strategy Setup
     # ----------------------------------------
     add_log("🧠 Phase 2: AI 주무관이 업무 처리 방향을 수립합니다...", "strat")
     
-    # 전략가 AI 호출 (없으면 간단히 생성)
-    if hasattr(Agents, 'strategist'):
-        strategy = Agents.strategist(user_input, legal_basis, search_results)
-    else:
-        # 혹시 strategist 함수가 없으면 임시 멘트
-        strategy = "법령에 근거하여 신속하고 정확한 처리가 필요합니다."
-
-    # [UI] 전략 보여주기
-    with st.expander("🧭 [방향] 업무 처리 가이드라인", expanded=True):
-        st.markdown(strategy)
+    # [수정] Agents -> LegalAgents
+    strategy = LegalAgents.strategist(user_input, legal_basis, search_results)
 
     # ----------------------------------------
     # Phase 3: Execution (Drafting)
     # ----------------------------------------
     add_log("📅 Phase 3: 기한 산정 및 공문서 작성 시작...", "calc")
-    meta_info = Agents.clerk(user_input)
+    
+    # [수정] legal_basis 인자 추가 (누락된 인자 보완)
+    meta_info = LegalAgents.clerk(user_input, legal_basis)
     
     add_log("✍️ 최종 공문서 조판 중...", "draft")
-    doc_data = Agents.drafter(user_input, legal_basis, meta_info)
+    
+    # [수정] strategy 인자 추가 (누락된 인자 보완)
+    doc_data = LegalAgents.drafter(user_input, legal_basis, meta_info, strategy)
     
     # ----------------------------------------
     # Phase 4: Persistence (Saving)
     # ----------------------------------------
     add_log("💾 업무 기록을 데이터베이스(Supabase)에 저장 중...", "sys")
-    save_result = db.save_report(user_input, legal_basis, doc_data)
+    
+    # [수정] db -> db_service, save_report -> save_log (이름 통일)
+    save_result = db_service.save_log(user_input, legal_basis, strategy, doc_data)
     
     add_log(f"✅ 모든 행정 절차가 완료되었습니다. ({save_result})", "sys")
     time.sleep(1) 
     
-    # 🧹 [청소 타임] 로그 창만 싹 지웁니다!
-    # (Phase 1, 2의 결과 박스들은 log_placeholder 밖에 있어서 안 지워집니다)
+    # 로그창 지우기 (결과는 리턴값으로 나감)
     log_placeholder.empty()
 
-    return doc_data, meta_info
+    return {
+        "doc": doc_data,
+        "meta": meta_info,
+        "law": legal_basis,
+        "search": search_results,
+        "strategy": strategy,
+        "save_msg": save_result
+    }
 
 # ==========================================
 # 5. Presentation Layer (UI)
@@ -411,14 +393,14 @@ def main():
 
     with col_left:
         st.title("🏢 AI 행정관 Pro")
-        st.caption("Gemini 2.5 + Search + Strategy + DB")
+        st.caption("Gemini + Search + Strategy + DB")
         st.markdown("---")
         
         st.markdown("### 🗣️ 업무 지시")
         user_input = st.text_area(
             "업무 내용",
             height=150,
-            placeholder="예시:\n- 아파트 단지 내 소방차 전용구역 불법 주차 차량 과태료 부과 예고 통지서 작성해줘.\n- 식품위생법 위반 식당 영업정지 사전 통지서 써줘.",
+            placeholder="예시:\n- 아파트 단지 내 소방차 전용구역 불법 주차 차량 과태료 부과 예고 통지서 작성해줘.",
             label_visibility="collapsed"
         )
         
@@ -428,17 +410,43 @@ def main():
             else:
                 try:
                     with st.spinner("AI 에이전트 팀이 협업 중입니다..."):
-                        doc, meta = run_workflow(user_input)
-                        st.session_state['final_doc'] = (doc, meta)
+                        # [핵심] 결과를 세션에 저장하여 '박제' (사라짐 방지)
+                        st.session_state['workflow_result'] = run_workflow(user_input)
                 except Exception as e:
                     st.error(f"시스템 오류 발생: {e}")
 
-        st.markdown("---")
-        st.info("💡 **Tip:** 법령/판례 검색 -> 전략 수립 -> 문서 작성 -> DB 저장까지 일괄 처리합니다.")
+        # [사라지지 않는 결과 화면 구현]
+        if 'workflow_result' in st.session_state:
+            res = st.session_state['workflow_result']
+            
+            st.markdown("---")
+            
+            # 1. DB 저장 결과
+            if "성공" in res['save_msg']:
+                st.success(f"✅ {res['save_msg']}")
+            else:
+                st.error(f"❌ {res['save_msg']}")
+
+            # 2. 법령 검토 결과
+            with st.expander("✅ [검토] 법령 및 유사 사례 확인", expanded=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**📜 적용 법령**")
+                    st.code(res['law'], language="text") 
+                with col2:
+                    st.markdown("**🌍 유사 사례**")
+                    st.info(res['search'])
+            
+            # 3. 전략 가이드라인
+            with st.expander("🧭 [방향] 업무 처리 가이드라인", expanded=True):
+                st.markdown(res['strategy'])
 
     with col_right:
-        if 'final_doc' in st.session_state:
-            doc, meta = st.session_state['final_doc']
+        if 'workflow_result' in st.session_state:
+            res = st.session_state['workflow_result']
+            doc = res['doc']
+            meta = res['meta']
+            
             if doc:
                 html_content = f"""
                 <div class="paper-sheet">
@@ -462,7 +470,6 @@ def main():
                 </div>
                 """
                 st.markdown(html_content, unsafe_allow_html=True)
-                st.download_button(label="🖨️ 다운로드 (HTML)", data=html_content, file_name="공문서.html", mime="text/html", use_container_width=True)
         else:
             st.markdown("""<div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'><h3>📄 Document Preview</h3><p>왼쪽에서 업무를 지시하면<br>완성된 공문서가 여기에 나타납니다.</p></div>""", unsafe_allow_html=True)
 
