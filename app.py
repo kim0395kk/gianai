@@ -404,7 +404,7 @@ def main():
             label_visibility="collapsed"
         )
         
-        if st.button("⚡ 스마트 행정 처분 시작", type="primary", use_container_width=True):
+        if st.button("⚡ 스마트 행정 시작", type="primary", use_container_width=True):
             if not user_input:
                 st.warning("내용을 입력해주세요.")
             else:
@@ -415,7 +415,7 @@ def main():
                 except Exception as e:
                     st.error(f"시스템 오류 발생: {e}")
 
-        # [사라지지 않는 결과 화면 구현]
+# [상태 유지] 세션에 데이터가 있으면 무조건 렌더링
         if 'workflow_result' in st.session_state:
             res = st.session_state['workflow_result']
             
