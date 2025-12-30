@@ -1,6 +1,8 @@
 import streamlit as st
 import google.generativeai as genai
 from groq import Groq
+from serpapi import GoogleSearch
+from supabase import create_client
 import json
 import re
 import time
@@ -41,26 +43,38 @@ st.markdown("""
     /* 로그 스타일 */
     .agent-log { font-family: 'Consolas', monospace; font-size: 0.85rem; padding: 6px 12px; border-radius: 6px; margin-bottom: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
     .log-legal { background-color: #eff6ff; color: #1e40af; border-left: 4px solid #3b82f6; } /* Blue */
+    .log-search { background-color: #fff7ed; color: #c2410c; border-left: 4px solid #f97316; } /* Orange */
+    .log-strat { background-color: #f5f3ff; color: #6d28d9; border-left: 4px solid #8b5cf6; } /* Purple */
     .log-calc { background-color: #f0fdf4; color: #166534; border-left: 4px solid #22c55e; } /* Green */
     .log-draft { background-color: #fef2f2; color: #991b1b; border-left: 4px solid #ef4444; } /* Red */
     .log-sys { background-color: #f3f4f6; color: #4b5563; border-left: 4px solid #9ca3af; } /* Gray */
+    
+    /* 전략 박스 스타일 */
+    .strategy-box { background-color: #fffbeb; border: 1px solid #fcd34d; padding: 15px; border-radius: 8px; margin-bottom: 15px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. Service Layer (Infrastructure)
+# 2. Infrastructure Layer (Services)
 # ==========================================
+
 class LLMService:
-    """Gemini 2.5 모델들을 순차적으로 시도하고, 실패 시 Groq로 백업하는 서비스"""
+    """
+    [Model Hierarchy]
+    1. Gemini 2.5 Flash
+    2. Gemini 2.5 Flash Lite
+    3. Gemini 2.0 Flash
+    4. Groq (Llama 3 Backup)
+    """
     def __init__(self):
         self.gemini_key = st.secrets["general"].get("GEMINI_API_KEY")
         self.groq_key = st.secrets["general"].get("GROQ_API_KEY")
         
-        # [설정 변경] 요청하신 모델 우선순위 리스트
-        # 1순위: gemini-2.5-flash-lite, 2순위: gemini-2.5-flash
+        # 모델 우선순위 리스트
         self.gemini_models = [
-            "gemini-2.5-flash-lite", 
-            "gemini-2.5-flash"
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash"
         ]
         
         if self.gemini_key:
@@ -69,46 +83,36 @@ class LLMService:
         self.groq_client = Groq(api_key=self.groq_key) if self.groq_key else None
 
     def _try_gemini(self, prompt, is_json=False, schema=None):
-        """지정된 Gemini 모델 리스트를 순회하며 생성을 시도"""
         for model_name in self.gemini_models:
             try:
+                # 모델 호출 (대소문자 이슈 방지 위해 lower 처리 등은 상황에 맞게)
                 model = genai.GenerativeModel(model_name)
-                
-                # 설정: JSON 모드 여부에 따라 config 분기
                 config = genai.GenerationConfig(
                     response_mime_type="application/json",
                     response_schema=schema
                 ) if is_json else None
                 
-                # 생성 요청
                 res = model.generate_content(prompt, generation_config=config)
-                return res.text, model_name # 성공 시 결과와 모델명 반환
-                
-            except Exception as e:
-                # 현재 모델 실패 시 다음 모델 시도 (로그는 내부적으로만 남김)
-                continue
-                
+                return res.text, model_name
+            except Exception:
+                continue # 다음 모델 시도
         raise Exception("All Gemini models failed")
 
     def generate_text(self, prompt):
-        """텍스트 생성 (Gemini 2.5 Loop -> Groq Fallback)"""
         try:
             text, model_used = self._try_gemini(prompt, is_json=False)
             return text
-        except Exception as gemini_error:
-            # Gemini 모두 실패 시 Groq 시도
+        except Exception:
             if self.groq_client:
                 return self._generate_groq(prompt)
-            return f"Error: {gemini_error}"
+            return "시스템 오류: AI 모델 연결 실패"
 
     def generate_json(self, prompt, schema=None):
-        """JSON 생성 (Gemini 2.5 Loop Only)"""
         try:
-            # Gemini Native JSON Mode 시도
             text, model_used = self._try_gemini(prompt, is_json=True, schema=schema)
             return json.loads(text)
         except Exception:
-            # Fallback: 텍스트로 받고 파싱 (Groq 등 활용 가능성 열어둠)
+            # Fallback for Groq or Gemini without JSON mode
             text = self.generate_text(prompt + "\n\nOutput strictly in JSON.")
             try:
                 match = re.search(r'\{.*\}', text, re.DOTALL)
@@ -127,37 +131,125 @@ class LLMService:
         except:
             return "System Error"
 
-# 싱글톤 인스턴스
+class SearchService:
+    """Google Search API (SerpApi) Wrapper"""
+    def __init__(self):
+        self.api_key = st.secrets["general"].get("SERPAPI_KEY")
+
+    def search_precedents(self, query):
+        if not self.api_key:
+            return "⚠️ 검색 API 키(SERPAPI_KEY)가 없어 유사 사례를 조회할 수 없습니다."
+        
+        try:
+            search_query = f"{query} 행정처분 판례 사례 민원 답변"
+            params = {
+                "engine": "google",
+                "q": search_query,
+                "api_key": self.api_key,
+                "num": 3,
+                "hl": "ko",
+                "gl": "kr"
+            }
+            search = GoogleSearch(params)
+            results = search.get_dict().get("organic_results", [])
+            
+            if not results:
+                return "관련된 유사 사례 검색 결과가 없습니다."
+
+            summary = []
+            for item in results:
+                title = item.get('title', '제목 없음')
+                snippet = item.get('snippet', '내용 없음')
+                link = item.get('link', '#')
+                summary.append(f"- **[{title}]({link})**: {snippet}")
+            
+            return "\n".join(summary)
+        except Exception as e:
+            return f"검색 중 오류 발생: {e}"
+
+class DatabaseService:
+    """Supabase Persistence Layer"""
+    def __init__(self):
+        try:
+            self.url = st.secrets["supabase"]["SUPABASE_URL"]
+            self.key = st.secrets["supabase"]["SUPABASE_KEY"]
+            self.client = create_client(self.url, self.key)
+            self.is_active = True
+        except Exception:
+            self.is_active = False
+
+    def save_log(self, user_input, legal_basis, strategy, doc_data):
+        if not self.is_active:
+            return "DB 미연결 (저장 건너뜀)"
+            
+        try:
+            data = {
+                "input_text": user_input,
+                "legal_basis": legal_basis,
+                "strategy": strategy,
+                "final_doc": json.dumps(doc_data, ensure_ascii=False),
+                "created_at": datetime.now().isoformat()
+            }
+            # 'law_logs' 테이블에 저장 (테이블이 존재해야 함)
+            self.client.table("law_logs").insert(data).execute()
+            return "DB 저장 성공"
+        except Exception as e:
+            return f"DB 저장 실패: {e}"
+
+# 싱글톤 인스턴스 생성
 llm_service = LLMService()
+search_service = SearchService()
+db_service = DatabaseService()
 
 # ==========================================
-# 3. Agent Layer (Business Logic)
+# 3. Domain Layer (Agents)
 # ==========================================
 class LegalAgents:
-    """각 역할을 수행하는 에이전트 집합"""
-    
     @staticmethod
     def researcher(situation):
-        """법률 근거 탐색"""
+        """Step 1: 법령 탐색"""
         prompt = f"""
-        당신은 30년 경력의 법제관입니다.
+        <role>당신은 30년 경력의 법제관입니다.</role>
+        <instruction>
         상황: "{situation}"
         위 상황에 적용할 가장 정확한 '법령명'과 '관련 조항'을 하나만 찾으시오.
         반드시 현행 대한민국 법령이어야 하며, 조항 번호까지 명시하세요.
         (예: 도로교통법 제32조(정차 및 주차의 금지))
+        
+        *주의: 입력에 실명 등 개인정보가 있다면 마스킹하여 처리하세요.
+        </instruction>
         """
         return llm_service.generate_text(prompt).strip()
 
     @staticmethod
-    def clerk(situation, legal_basis):
-        """날짜 및 기한 동적 산정"""
-        today = datetime.now()
+    def strategist(situation, legal_basis, search_results):
+        """Step 2: 전략 수립"""
+        prompt = f"""
+        당신은 행정 업무 베테랑 '주무관'입니다.
         
+        [민원 상황]: {situation}
+        [법적 근거]: {legal_basis}
+        [유사 사례/판례]: {search_results}
+        
+        위 정보를 종합하여 이 민원을 처리하기 위한 **대략적인 업무 처리 방향(Strategy)**을 수립하세요.
+        
+        다음 3가지 항목을 포함하여 마크다운으로 작성하세요:
+        1. **처리 방향**: (예: 강경 대응, 계도 위주, 반려 등)
+        2. **핵심 주의사항**: (절차상 놓치면 안 되는 것, 법적 쟁점)
+        3. **예상 반발 및 대응**: (민원인이 항의할 경우 대응 논리)
+        
+        간결하고 명확하게 작성하세요.
+        """
+        return llm_service.generate_text(prompt)
+
+    @staticmethod
+    def clerk(situation, legal_basis):
+        """Step 3: 기한 산정"""
+        today = datetime.now()
         prompt = f"""
         오늘: {today.strftime('%Y-%m-%d')}
         상황: {situation}
         법령: {legal_basis}
-        
         위 상황에서 행정처분 사전통지나 이행 명령 시, 법적으로(또는 통상적으로) 부여해야 하는 '이행/의견제출 기간'은 며칠인가?
         설명 없이 숫자(일수)만 출력하세요. (예: 10, 15, 20)
         모르겠으면 15를 출력하세요.
@@ -167,9 +259,7 @@ class LegalAgents:
             days = int(re.sub(r'[^0-9]', '', res))
         except:
             days = 15
-
         deadline = today + timedelta(days=days)
-        
         return {
             "today_str": today.strftime("%Y. %m. %d."),
             "deadline_str": deadline.strftime("%Y. %m. %d."),
@@ -178,88 +268,115 @@ class LegalAgents:
         }
 
     @staticmethod
-    def drafter(situation, legal_basis, meta_info):
-        """공문서 작성"""
+    def drafter(situation, legal_basis, meta_info, strategy):
+        """Step 4: 공문서 작성"""
         doc_schema = {
             "type": "OBJECT",
             "properties": {
                 "title": {"type": "STRING", "description": "공문서 제목"},
                 "receiver": {"type": "STRING", "description": "수신인"},
-                "body_paragraphs": {
-                    "type": "ARRAY", 
-                    "items": {"type": "STRING"},
-                    "description": "본문 단락 리스트"
-                },
-                "department_head": {"type": "STRING", "description": "발신 명의 (예: OO시장)"}
+                "body_paragraphs": {"type": "ARRAY", "items": {"type": "STRING"}},
+                "department_head": {"type": "STRING", "description": "발신 명의"}
             },
             "required": ["title", "receiver", "body_paragraphs", "department_head"]
         }
-
+        
         prompt = f"""
         당신은 행정기관의 베테랑 서기입니다. 아래 정보를 바탕으로 완결된 공문서를 작성하세요.
         
         [입력 정보]
         - 민원 상황: {situation}
         - 법적 근거: {legal_basis}
-        - 문서 번호: {meta_info['doc_num']}
         - 시행 일자: {meta_info['today_str']}
-        - 제출 기한: {meta_info['deadline_str']} ({meta_info['days_added']}일 부여됨)
+        - 기한: {meta_info['deadline_str']} ({meta_info['days_added']}일)
+        
+        [업무 처리 가이드라인 (전략)]
+        {strategy}
         
         [작성 원칙]
-        1. 수신인이 불명확하면 상황에 맞춰 'OOO 귀하', '차량소유주 귀하' 등으로 추론.
-        2. 본문은 [처분 원인 및 경과] -> [법적 근거] -> [처분 내용 및 기한] -> [불이행 시 조치/구제절차] 순서로 작성.
-        3. 어조는 정중하되 단호한 공문서 표준어 사용.
+        1. 위 '업무 처리 가이드라인'의 기조를 반영하여 어조를 결정하세요.
+        2. 수신인이 불명확하면 상황에 맞춰 추론하세요.
+        3. 본문 구조: [경위] -> [근거] -> [처분 내용] -> [권리구제 절차]
+        4. 개인정보(이름, 번호)는 반드시 마스킹('OOO') 처리하세요.
         """
-        
         return llm_service.generate_json(prompt, schema=doc_schema)
 
 # ==========================================
-# 4. Use Case (Orchestration)
+# 4. Application Layer (Workflow)
 # ==========================================
 def run_workflow(user_input):
-    """에이전트 조율 및 실행"""
     log_placeholder = st.empty()
     logs = []
-
+    
     def add_log(msg, style="sys"):
         logs.append(f"<div class='agent-log log-{style}'>{msg}</div>")
         log_placeholder.markdown("".join(logs), unsafe_allow_html=True)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
-    # 1. 법률 분석
-    add_log("👨‍⚖️ Legal Agent: 법령 및 판례 데이터베이스 검색 중...", "legal")
-    legal_basis = LegalAgents.researcher(user_input)
-    add_log(f"📜 법적 근거 확보: {legal_basis}", "legal")
-
-    # 2. 행정 처리
-    add_log("📅 Clerk Agent: 행정절차법에 따른 기한 산정 중...", "calc")
-    meta_info = LegalAgents.clerk(user_input, legal_basis)
-    add_log(f"⏳ 기한 설정: {meta_info['days_added']}일 ({meta_info['deadline_str']} 까지)", "calc")
-
-    # 3. 문서 작성
-    add_log("✍️ Drafter Agent: 공문서 표준 서식 적용 및 조판 중...", "draft")
-    doc_data = LegalAgents.drafter(user_input, legal_basis, meta_info)
+    # ----------------------------------------
+    # Phase 1: Fact Check & Research
+    # ----------------------------------------
+    add_log("🔍 Phase 1: 법령 및 유사 사례 리서치 중...", "legal")
     
-    add_log("✅ 모든 행정 절차가 완료되었습니다.", "sys")
+    # 병렬 처리 시늉
+    legal_basis = LegalAgents.researcher(user_input)
+    add_log(f"📜 법적 근거 발견: {legal_basis}", "legal")
+    
+    add_log("🌍 구글 검색 엔진 가동: 유사 사례 판례 수집 중...", "search")
+    search_results = search_service.search_precedents(user_input)
+    
+    # [UI Check]
+    with st.expander("✅ [검토] 법령 및 유사 사례 확인", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info(f"**적용 법령**\n\n{legal_basis}")
+        with col2:
+            st.warning(f"**유사 사례 검색 결과**\n\n{search_results}")
+
+    # ----------------------------------------
+    # Phase 2: Strategy Setup
+    # ----------------------------------------
+    add_log("🧠 Phase 2: AI 주무관이 업무 처리 방향을 수립합니다...", "strat")
+    strategy = LegalAgents.strategist(user_input, legal_basis, search_results)
+    
+    # [UI Check]
+    with st.expander("🧭 [방향] 업무 처리 가이드라인", expanded=True):
+        st.markdown(strategy)
+
+    # ----------------------------------------
+    # Phase 3: Execution (Drafting)
+    # ----------------------------------------
+    add_log("📅 Phase 3: 기한 산정 및 공문서 작성 시작...", "calc")
+    meta_info = LegalAgents.clerk(user_input, legal_basis)
+    add_log(f"⏳ 기한 설정: {meta_info['days_added']}일 후 ({meta_info['deadline_str']})", "calc")
+    
+    add_log("✍️ 최종 공문서 조판 중 (Formatting)...", "draft")
+    doc_data = LegalAgents.drafter(user_input, legal_basis, meta_info, strategy)
+    
+    # ----------------------------------------
+    # Phase 4: Persistence (Saving)
+    # ----------------------------------------
+    add_log("💾 업무 기록을 데이터베이스(Supabase)에 저장 중...", "sys")
+    save_result = db_service.save_log(user_input, legal_basis, strategy, doc_data)
+    
+    add_log(f"✅ 모든 행정 절차가 완료되었습니다. ({save_result})", "sys")
     time.sleep(1)
     log_placeholder.empty()
 
     return doc_data, meta_info
 
 # ==========================================
-# 5. UI Presentation (Main App)
+# 5. Presentation Layer (UI)
 # ==========================================
 def main():
     col_left, col_right = st.columns([1, 1.2])
 
     with col_left:
-        st.title("🏢 AI 행정관")
-        st.caption("Gemini 2.5 Powered Action Agent")
+        st.title("🏢 AI 행정관 Pro")
+        st.caption("Gemini 2.5 + Search + Strategy + DB")
         st.markdown("---")
         
         st.markdown("### 🗣️ 업무 지시")
-        st.markdown("상황을 구체적으로 입력하세요. AI가 법령 검토부터 문서 작성까지 일괄 처리합니다.")
-        
         user_input = st.text_area(
             "업무 내용",
             height=150,
@@ -267,26 +384,24 @@ def main():
             label_visibility="collapsed"
         )
         
-        if st.button("⚡ 행정 처분 시작", type="primary", use_container_width=True):
+        if st.button("⚡ 스마트 행정 처분 시작", type="primary", use_container_width=True):
             if not user_input:
                 st.warning("내용을 입력해주세요.")
             else:
                 try:
-                    with st.spinner("Gemini 2.5 에이전트들이 협업 중입니다..."):
+                    with st.spinner("AI 에이전트 팀이 협업 중입니다..."):
                         doc, meta = run_workflow(user_input)
                         st.session_state['final_doc'] = (doc, meta)
                 except Exception as e:
                     st.error(f"시스템 오류 발생: {e}")
 
         st.markdown("---")
-        st.info("💡 **Tip:** 복잡한 양식을 고민하지 마세요. '누가, 무엇을, 왜'만 입력하면 됩니다.")
+        st.info("💡 **Tip:** 법령/판례 검색 -> 전략 수립 -> 문서 작성 -> DB 저장까지 일괄 처리합니다.")
 
     with col_right:
         if 'final_doc' in st.session_state:
             doc, meta = st.session_state['final_doc']
-            
             if doc:
-                # A4 용지 렌더링 (HTML/CSS)
                 html_content = f"""
                 <div class="paper-sheet">
                     <div class="stamp">직인생략</div>
@@ -299,37 +414,19 @@ def main():
                     <hr style="border: 1px solid black; margin-bottom: 30px;">
                     <div class="doc-body">
                 """
-                
                 paragraphs = doc.get('body_paragraphs', [])
                 if isinstance(paragraphs, str): paragraphs = [paragraphs]
-                
                 for p in paragraphs:
                     html_content += f"<p style='margin-bottom: 15px;'>{p}</p>"
-                
                 html_content += f"""
                     </div>
-                    <div class="doc-footer">
-                        {doc.get('department_head', '행정기관장')}
-                    </div>
+                    <div class="doc-footer">{doc.get('department_head', '행정기관장')}</div>
                 </div>
                 """
-                
                 st.markdown(html_content, unsafe_allow_html=True)
-                
-                st.download_button(
-                    label="🖨️ 다운로드 (HTML)",
-                    data=html_content,
-                    file_name="공문서.html",
-                    mime="text/html",
-                    use_container_width=True
-                )
+                st.download_button(label="🖨️ 다운로드 (HTML)", data=html_content, file_name="공문서.html", mime="text/html", use_container_width=True)
         else:
-            st.markdown("""
-            <div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'>
-                <h3>📄 Document Preview</h3>
-                <p>왼쪽에서 업무를 지시하면<br>완성된 공문서가 여기에 나타납니다.</p>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("""<div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'><h3>📄 Document Preview</h3><p>왼쪽에서 업무를 지시하면<br>완성된 공문서가 여기에 나타납니다.</p></div>""", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
