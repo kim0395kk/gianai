@@ -388,29 +388,29 @@ def run_workflow(user_input):
 # ==========================================
 # 5. Presentation Layer (UI)
 # ==========================================
-import textwrap 
-
+# [수정] main 함수 전체 교체
 def main():
     col_left, col_right = st.columns([1, 1.2])
 
-    # ====================================================
-    # [왼쪽] 입력 및 결과 (법령 안 사라짐)
-    # ====================================================
+    # ---------------------------------------------------------
+    # [왼쪽] 입력 및 결과 (새로고침 해도 안 사라짐)
+    # ---------------------------------------------------------
     with col_left:
         st.title("🏢 AI 행정관 Pro")
         st.markdown("---")
         
         user_input = st.text_area("업무 지시", height=150, placeholder="예: 무단투기 과태료 부과 통지서 작성")
         
-        # [버튼 클릭 시] 세션에 결과 저장
-        if st.button("⚡ 업무 시작", type="primary", use_container_width=True):
+        # 1. 실행 버튼 (누르면 세션에 저장)
+        if st.button("⚡ 스마트 행정 처분 시작", type="primary", use_container_width=True):
             if user_input:
                 try:
-                    with st.spinner("AI 에이전트가 협업 중입니다..."):
+                    with st.spinner("AI 에이전트가 분석 중입니다..."):
+                        # [핵심] 결과를 세션에 '박제'
                         st.session_state['workflow_result'] = run_workflow(user_input)
                 except Exception as e: st.error(f"오류: {e}")
 
-        # [상태 유지] 세션에 데이터가 있으면 무조건 표시
+        # 2. 결과 표시 (세션에 데이터가 있으면 무조건 그림)
         if 'workflow_result' in st.session_state:
             res = st.session_state['workflow_result']
             
@@ -425,9 +425,9 @@ def main():
             with st.expander("🧭 [방향] 처리 가이드라인", expanded=True):
                 st.markdown(res.get('strategy', ''))
 
-    # ====================================================
-    # [오른쪽] 공문서 미리보기 (깨짐 해결됨)
-    # ====================================================
+    # ---------------------------------------------------------
+    # [오른쪽] 공문서 미리보기 (화면 깨짐 완벽 해결)
+    # ---------------------------------------------------------
     with col_right:
         if 'workflow_result' in st.session_state:
             res = st.session_state['workflow_result']
@@ -435,32 +435,32 @@ def main():
             meta = res.get('meta')
             
             if doc:
-                # 1. 본문 문단 HTML 변환
+                # 문단 HTML 변환
                 paragraphs = doc.get('body_paragraphs', [])
                 if isinstance(paragraphs, str): paragraphs = [paragraphs]
                 p_html = "".join([f"<p style='margin-bottom: 15px;'>{p}</p>" for p in paragraphs])
 
-                # 2. [핵심 해결] textwrap.dedent를 사용하여 숨어있는 들여쓰기를 강제로 제거
-                # 이렇게 하면 코드에서 보기 좋게 들여쓰기를 해도, 실제로는 왼쪽 벽에 딱 붙어서 나옵니다.
-                html_content = textwrap.dedent(f"""
-                    <div class="paper-sheet">
-                        <div class="stamp">직인생략</div>
-                        <div class="doc-header">{doc.get('title', '공 문 서')}</div>
-                        <div class="doc-info">
-                            <span>문서번호: {meta.get('doc_num', '')}</span>
-                            <span>시행일자: {meta.get('today_str', '')}</span>
-                            <span>수신: {doc.get('receiver', '참조')}</span>
-                        </div>
-                        <hr style="border: 1px solid black; margin-bottom: 30px;">
-                        <div class="doc-body">
-                            {p_html}
-                        </div>
-                        <div class="doc-footer">{doc.get('department_head', '행정기관장')}</div>
-                    </div>
-                """).strip()
-
+                # [🚨 중요] HTML 코드는 들여쓰기 절대 금지! 왼쪽 벽에 딱 붙이세요.
+                # 그래야 브라우저가 '코드'가 아니라 '디자인'으로 인식합니다.
+                html_content = f"""
+<div class="paper-sheet">
+<div class="stamp">직인생략</div>
+<div class="doc-header">{doc.get('title', '공 문 서')}</div>
+<div class="doc-info">
+<span>문서번호: {meta.get('doc_num', '')}</span>
+<span>시행일자: {meta.get('today_str', '')}</span>
+<span>수신: {doc.get('receiver', '참조')}</span>
+</div>
+<hr style="border: 1px solid black; margin-bottom: 30px;">
+<div class="doc-body">
+{p_html}
+</div>
+<div class="doc-footer">{doc.get('department_head', '행정기관장')}</div>
+</div>
+"""
                 st.markdown(html_content, unsafe_allow_html=True)
                 
+                # 다운로드 버튼
                 st.download_button(
                     label="🖨️ 다운로드 (HTML)",
                     data=html_content,
@@ -469,12 +469,13 @@ def main():
                     use_container_width=True
                 )
         else:
+            # 대기 화면 HTML (이것도 왼쪽 벽에 붙임)
             st.markdown("""
-            <div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'>
-                <h3>📄 Document Preview</h3>
-                <p>왼쪽에서 업무를 지시하면<br>완성된 공문서가 여기에 나타납니다.</p>
-            </div>
-            """, unsafe_allow_html=True)
+<div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'>
+<h3>📄 Document Preview</h3>
+<p>왼쪽에서 업무를 지시하면<br>완성된 공문서가 여기에 나타납니다.</p>
+</div>
+""", unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
