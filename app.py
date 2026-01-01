@@ -101,16 +101,16 @@ class LLMService:
     def generate_text(self, prompt):
         try:
             text, model_used = self._try_gemini(prompt, is_json=False)
-            return text
+            return text, model_used
         except Exception:
             if self.groq_client:
-                return self._generate_groq(prompt)
+                return self._generate_groq(prompt), "Groq(Llama-3.3)"
             return "시스템 오류: AI 모델 연결 실패"
 
     def generate_json(self, prompt, schema=None):
         try:
             text, model_used = self._try_gemini(prompt, is_json=True, schema=schema)
-            return json.loads(text)
+            return json.loads(text), model_used
         except Exception:
             # Fallback for Groq or Gemini without JSON mode
             text = self.generate_text(prompt + "\n\nOutput strictly in JSON.")
