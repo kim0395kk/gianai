@@ -72,8 +72,8 @@ class LLMService:
         
         # [선생님 요청사항] 모델 리스트 원상복구 (2.5 포함)
         self.gemini_models = [
-            "gemini-3-flash",
             "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
             "gemini-2.0-flash-lite"
         ]
         
