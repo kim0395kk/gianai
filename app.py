@@ -61,9 +61,9 @@ st.markdown("""
 class LLMService:
     """
     [Model Hierarchy]
-    1. Gemini 2.5 Flash
-    2. Gemini 2.5 Flash Lite
-    3. Gemini 2.0 Flash
+    1. Gemini 3 Flash
+    2. Gemini 2.5 Flash 
+    3. Gemini 2.0 Flash Lite
     4. Groq (Llama 3 Backup)
     """
     def __init__(self):
@@ -72,9 +72,9 @@ class LLMService:
         
         # [선생님 요청사항] 모델 리스트 원상복구 (2.5 포함)
         self.gemini_models = [
+            "gemini-3-flash",
             "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash"
+            "gemini-2.0-flash-lite"
         ]
         
         if self.gemini_key:
