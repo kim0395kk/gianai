@@ -316,75 +316,77 @@ class LegalAgents:
 # ==========================================
 # 4. Workflow (UI 로직 - 버그 수정판)
 # ==========================================
-def run_workflow(user_input):
-    # 1. 로그가 출력될 공간
+def run_workflow(user_input, dept, officer):
+    # 로그 및 메타 정보 초기화
     log_placeholder = st.empty()
     logs = []
+    model_info = {} # [추가] 단계별 모델 정보를 담을 그릇
     
     def add_log(msg, style="sys"):
+        style = style if style in ["legal", "search", "strat", "calc", "draft", "sys"] else "sys"
         logs.append(f"<div class='agent-log log-{style}'>{msg}</div>")
         log_placeholder.markdown("".join(logs), unsafe_allow_html=True)
-        time.sleep(0.3)
+        time.sleep(0.1)
 
     # ----------------------------------------
-    # Phase 1: Fact Check & Research
+    # Phase 1: Fact Check & Research (법령 리서치)
     # ----------------------------------------
     add_log("🔍 Phase 1: 법령 및 유사 사례 리서치 중...", "legal")
     
-    # [수정] Agents -> LegalAgents (클래스 이름 통일)
-    legal_basis = LegalAgents.researcher(user_input)
-    add_log(f"📜 법적 근거 발견 완료", "legal")
+    # [수정] 결과값과 모델명(m1)을 함께 받아옴
+    legal_basis, m1 = llm_service.generate_text(LegalAgents.researcher_prompt(user_input))
+    model_info['법령리서치'] = m1
+    add_log(f"📜 법적 근거 발견 완료 (사용 모델: {m1})", "legal")
     
-    add_log("🌍 구글 검색 엔진 가동...", "search")
+    add_log("🌍 구글 검색 엔진 가동 (유사 사례 수집)...", "search")
     try:
         search_results = search_service.search_precedents(user_input)
     except:
         search_results = "검색 모듈 미연결 (건너뜀)"
     
     # ----------------------------------------
-    # Phase 2: Strategy Setup
+    # Phase 2: Strategy Setup (전략 수립)
     # ----------------------------------------
     add_log("🧠 Phase 2: AI 주무관이 업무 처리 방향을 수립합니다...", "strat")
     
-    # [수정] Agents -> LegalAgents
-    strategy = LegalAgents.strategist(user_input, legal_basis, search_results)
+    # [수정] 전략과 모델명(m2) 수집
+    strategy, m2 = llm_service.generate_text(LegalAgents.strategist_prompt(user_input, legal_basis, search_results))
+    model_info['전략수립'] = m2
+    add_log(f"💡 행정 전략 수립 완료 (사용 모델: {m2})", "strat")
 
     # ----------------------------------------
-    # Phase 3: Execution (Drafting)
+    # Phase 3: Execution (기한 산정 및 공문 작성)
     # ----------------------------------------
     add_log("📅 Phase 3: 기한 산정 및 공문서 작성 시작...", "calc")
     
-    # [수정] legal_basis 인자 추가 (누락된 인자 보완)
+    # 기한 산정 (간단한 계산이므로 메인 모델 사용)
     meta_info = LegalAgents.clerk(user_input, legal_basis)
     
-    add_log("✍️ 최종 공문서 조판 중...", "draft")
+    add_log("✍️ 최종 공문서 조판 및 문장 다듬기 중...", "draft")
     
-    # [수정] strategy 인자 추가 (누락된 인자 보완)
-    doc_data = LegalAgents.drafter(user_input, legal_basis, meta_info, strategy)
-    
+    # [수정] JSON 결과와 모델명(m3) 수집
+    doc_data, m3 = llm_service.generate_json(LegalAgents.drafter_prompt(user_input, legal_basis, meta_info, strategy))
+    model_info['공문서작성'] = m3
+    add_log(f"📄 공문서 생성 완료 (사용 모델: {m3})", "draft")
+
     # ----------------------------------------
-    # Phase 4: Persistence (Saving)
+    # Phase 4: Persistence & Return
     # ----------------------------------------
-    add_log("💾 업무 기록을 데이터베이스(Supabase)에 저장 중...", "sys")
-    
-    # [수정] db -> db_service, save_report -> save_log (이름 통일)
+    add_log("💾 업무 기록을 DB(Supabase)에 박제 중...", "sys")
     save_result = db_service.save_log(user_input, legal_basis, strategy, doc_data)
     
-    add_log(f"✅ 모든 행정 절차가 완료되었습니다. ({save_result})", "sys")
-    time.sleep(1) 
-    
-    # 로그창 지우기 (결과는 리턴값으로 나감)
+    add_log(f"✅ 모든 절차 완료! ({save_result})", "sys")
+    time.sleep(0.8)
     log_placeholder.empty()
 
     return {
         "doc": doc_data,
         "meta": meta_info,
         "law": legal_basis,
-        "search": search_results,
         "strategy": strategy,
+        "model_usage": model_info, # [핵심] UI 표시를 위해 리턴값에 포함
         "save_msg": save_result
     }
-
 # ==========================================
 # 5. Presentation Layer (UI)
 # ==========================================
