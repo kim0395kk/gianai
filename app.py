@@ -1270,24 +1270,65 @@ class LegalAgents:
 
     @staticmethod
     def drafter(situation: str, legal_basis: str, meta_info: dict, strategy: str) -> dict:
-        schema = {"type": "object", "properties": {"title": {"type": "string"}, "receiver": {"type": "string"},
-                  "body_paragraphs": {"type": "array", "items": {"type": "string"}}, "department_head": {"type": "string"}},
-                  "required": ["title", "receiver", "body_paragraphs", "department_head"]}
+        schema = {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "receiver": {"type": "string"},
+                "body_paragraphs": {"type": "array", "items": {"type": "string"}},
+                "department_head": {"type": "string"},
+            },
+            "required": ["title", "receiver", "body_paragraphs", "department_head"],
+        }
 
-        prompt = f"""당신은 행정기관 서기입니다.
-[민원]: {situation}
-[법적 근거]: {legal_basis[:1500]}
-[시행일]: {meta_info.get('today_str','')} / [기한]: {meta_info.get('deadline_str','')}
-[전략]: {strategy[:800]}
+        prompt = f"""
+당신은 행정기관의 20년 경력 베테랑 서기입니다.
+아래 정보를 바탕으로 **격식을 갖춘 완결된 공문서**를 작성하세요.
 
-공문서 JSON 출력 (title/receiver/body_paragraphs/department_head).
-본문: 경위->법적근거->처분->이의제기"""
+[입력 정보]
+- 민원 상황: {situation}
+- 법적 근거: {legal_basis[:2000]}
+- 시행일자: {meta_info.get('today_str', '')}
+- 이행기한: {meta_info.get('deadline_str', '')} ({meta_info.get('days_added', 15)}일)
+- 문서번호: {meta_info.get('doc_num', '')}
+
+[처리 전략]
+{strategy[:1200]}
+
+[공문서 작성 원칙]
+1) 본문에 법 조항 인용 필수 (예: "「도로교통법」 제32조에 따라")
+2) 구조: 경위 → 법적 근거 → 처분 내용 → 이의제기 안내
+3) 개인정보는 'OOO', '○○○' 등으로 마스킹
+4) 행정 공문체 어투 사용 ("~하였음", "~바람", "~함")
+5) 이의제기 절차는 행정심판법, 행정소송법 근거 포함
+
+[JSON 출력 형식]
+{{
+  "title": "공문 제목 (예: 무단방치차량 이동명령에 대한 안내)",
+  "receiver": "수신자 (예: 민원인 OOO 귀하)",
+  "body_paragraphs": [
+    "1. (경위) 귀하께서 20XX. XX. XX. 신고하신 사안 관련 조치 현황을 알려드립니다.",
+    "2. (법적 근거) 「관련법령」 제XX조에 따라...",
+    "3. (처분 내용) 위 법령에 근거하여 다음과 같이 조치하였음을 알려드립니다...",
+    "4. (이의제기) 본 처분에 이의가 있으시면 「행정심판법」에 따라 처분 통지일로부터 90일 이내에 행정심판을, 「행정소송법」에 따라 처분 통지일로부터 1년 이내에 행정소송을 제기할 수 있습니다."
+  ],
+  "department_head": "OO시 OO과장"
+}}
+"""
         doc = llm_service.generate_json(prompt, schema=schema)
 
         if not isinstance(doc, dict):
-            return {"title": "공문(초안)", "receiver": "수신자 참조",
-                    "body_paragraphs": ["1. (경위)", "2. (법적 근거)", "3. (처분)", "4. (이의제기)"],
-                    "department_head": "행정기관장"}
+            return {
+                "title": "행정처분 안내",
+                "receiver": "민원인 OOO 귀하",
+                "body_paragraphs": [
+                    "1. (경위) 귀하께서 신고하신 사안과 관련하여 안내드립니다.",
+                    "2. (법적 근거) 관련 법령에 따라 다음과 같이 조치합니다.",
+                    "3. (처분 내용) 관할 부서에서 현장 확인 후 필요한 조치를 진행합니다.",
+                    "4. (이의제기) 본 처분에 이의가 있으신 경우 행정심판 또는 행정소송을 제기할 수 있습니다.",
+                ],
+                "department_head": "행정기관장",
+            }
 
         bp = doc.get("body_paragraphs")
         doc["body_paragraphs"] = [bp] if isinstance(bp, str) else (bp if isinstance(bp, list) else [])
