@@ -50,7 +50,7 @@ MAX_FOLLOWUP_Q = 5
 LAW_MAX_WORKERS = 3
 HTTP_RETRIES = 2
 HTTP_TIMEOUT = 12
-VERTEX_TIMEOUT = 60  # cold start 대비
+VERTEX_TIMEOUT = 30  # cold start 대비 (60에서 30으로 단축)
 KST = timezone(timedelta(hours=9))
 KOREA_DOMAIN = "@korea.kr"
 
@@ -533,6 +533,10 @@ def http_post(url: str, json_body: dict, headers: Optional[dict] = None,
             r = requests.post(url, json=json_body, headers=headers, timeout=timeout)
             r.raise_for_status()
             return r
+        except requests.exceptions.Timeout as e:
+            last_err = f"타임아웃 ({timeout}초 초과): {e}"
+            if i < retries:
+                time.sleep(0.3 * (2 ** i))
         except Exception as e:
             last_err = e
             if i < retries:
@@ -813,6 +817,14 @@ class LLMService:
                     txt = (self._vertex_generate(prompt, m) or "").strip()
                     if txt:
                         return txt
+                except RuntimeError as e:
+                    error_str = str(e)
+                    vertex_errors.append(f"{m}: {error_str}")
+                    # 타임아웃이면 즉시 다음 모델로
+                    if "timeout" in error_str.lower() or "타임아웃" in error_str:
+                        continue
+                    # 다른 에러는 기록만
+                    continue
                 except Exception as e:
                     vertex_errors.append(f"{m}: {str(e)}")
                     continue
@@ -820,10 +832,10 @@ class LLMService:
         # Groq 백업
         try:
             return self._generate_groq(prompt)
-        except Exception as groq_err:
+        except RuntimeError as groq_err:
             error_msg = f"LLM 연결 실패\n"
             if vertex_errors:
-                error_msg += f"Vertex AI 오류:\n" + "\n".join(vertex_errors) + "\n"
+                error_msg += f"Vertex AI 오류:\n" + "\n".join(vertex_errors[:3]) + "\n"  # 최대 3개만
             error_msg += f"Groq 오류: {groq_err}"
             raise RuntimeError(error_msg)
 
@@ -1224,8 +1236,18 @@ def _compact(text: str, limit: int = 2500) -> str:
 
 
 def _json_or_fallback(prompt: str, schema: dict, fallback: dict) -> dict:
-    j = llm_service.generate_json(prompt, schema=schema)
-    return j if isinstance(j, dict) else fallback
+    try:
+        j = llm_service.generate_json(prompt, schema=schema)
+        return j if isinstance(j, dict) else fallback
+    except RuntimeError as e:
+        # 타임아웃이나 연결 실패 시 에러 메시지 표시
+        error_msg = str(e)
+        if "타임아웃" in error_msg or "timeout" in error_msg.lower() or "연결 실패" in error_msg or "LLM 연결 실패" in error_msg:
+            st.warning(f"⚠️ LLM 연결 타임아웃/실패: {error_msg[:200]}")
+        return fallback
+    except Exception as e:
+        st.warning(f"⚠️ LLM JSON 생성 실패: {str(e)[:200]}")
+        return fallback
 
 
 def _list_or_fallback(prompt: str, fallback: list) -> list:
@@ -2055,8 +2077,25 @@ def run_workflow(user_input: str) -> dict:
     # Phase 0) 사건카드 + 라우팅
     add_log("🧩 Phase 0: 사건카드 구조화 및 라우팅...", "sys")
     t = time.perf_counter()
-    case_card = MultiAgentSystem.extract_case_card(user_input)
-    route = MultiAgentSystem.route(case_card)
+    try:
+        case_card = MultiAgentSystem.extract_case_card(user_input)
+        route = MultiAgentSystem.route(case_card)
+    except Exception as e:
+        add_log(f"⚠️ 라우팅 중 오류: {str(e)[:200]}", "sys")
+        # 기본값으로 계속 진행
+        case_card = {
+            "task_title": "업무 처리",
+            "task_type": "미분류",
+            "goal": "민원을 처리하고 행정적으로 정리",
+            "facts_timeline": [user_input[:120] if user_input else "입력 없음"],
+            "deliverable": "회신문",
+        }
+        route = {
+            "mode": "A",
+            "risk_level": "LOW",
+            "agents": ["LEGAL", "INTEGRATOR"],
+        }
+    
     if route.get("risk_level") not in ["LOW", "MEDIUM", "HIGH"]:
         route["risk_level"] = "LOW"
     if route.get("mode") not in ["A", "B", "C", "D", "E"]:
