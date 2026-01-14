@@ -1,9 +1,12 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
+# Govable AI Bureau - Stabilized Version
+# Last updated: 2026-01-14
 
 import json
 import re
 import time
+import threading
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -13,27 +16,29 @@ from typing import Optional, Dict, Any, List, Tuple
 import streamlit as st
 
 # ---------------------------
-# Optional deps (Streamlit Cloud에서 누락 시 앱 전체가 죽지 않도록)
+# Optional deps (앱 전체가 죽지 않도록)
 # ---------------------------
 try:
     import requests
-except Exception:  # pragma: no cover
+except Exception:
     requests = None
 
 try:
     from groq import Groq
-except Exception:  # pragma: no cover
+except Exception:
     Groq = None
 
 try:
     from supabase import create_client
-except Exception:  # pragma: no cover
+    from supabase.lib.client_options import ClientOptions
+except Exception:
     create_client = None
+    ClientOptions = None
 
 try:
     from google.oauth2 import service_account
     from google.auth.transport.requests import Request as GoogleAuthRequest
-except Exception:  # pragma: no cover
+except Exception:
     service_account = None
     GoogleAuthRequest = None
 
@@ -41,11 +46,24 @@ except Exception:  # pragma: no cover
 # ==========================================
 # 0) Settings
 # ==========================================
-MAX_FOLLOWUP_Q = 5     # 후속 질문 최대 5회
-LAW_MAX_WORKERS = 3    # 법령 병렬 조회 워커 수(너무 높이면 실패율↑)
-HTTP_RETRIES = 2       # 외부 API 재시도 횟수
-HTTP_TIMEOUT = 10      # 외부 API 타임아웃(초)
+MAX_FOLLOWUP_Q = 5
+LAW_MAX_WORKERS = 3
+HTTP_RETRIES = 2
+HTTP_TIMEOUT = 12
+VERTEX_TIMEOUT = 60  # cold start 대비
 KST = timezone(timedelta(hours=9))
+KOREA_DOMAIN = "@korea.kr"
+
+# Thread lock for Vertex token refresh
+_vertex_lock = threading.Lock()
+
+
+def _safe_secrets(section: str) -> dict:
+    """secrets.toml이 아예 없어도 에러 없이 빈 dict 반환"""
+    try:
+        return dict(st.secrets.get(section, {}))
+    except Exception:
+        return {}
 
 
 # ==========================================
@@ -56,42 +74,245 @@ st.set_page_config(layout="wide", page_title="AI Bureau: The Legal Glass", page_
 st.markdown(
     """
 <style>
-    .stApp { background-color: #f3f4f6; }
-
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+    
+    /* Modern gradient background */
+    .stApp { 
+        background: linear-gradient(135deg, #f0f4f8 0%, #e1e8ed 50%, #d4dce3 100%);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    
+    /* Sidebar enhancement */
+    [data-testid="stSidebar"] {
+        background: rgba(255, 255, 255, 0.85);
+        backdrop-filter: blur(20px);
+        border-right: 1px solid rgba(70, 130, 180, 0.1);
+    }
+    
+    [data-testid="stSidebar"] > div:first-child {
+        padding-top: 2rem;
+    }
+    
+    /* Modern glassmorphic paper sheet */
     .paper-sheet {
-        background-color: white;
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(30px);
         width: 100%;
         max-width: 210mm;
         min-height: 297mm;
         padding: 25mm;
         margin: auto;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-        font-family: 'Batang', serif;
-        color: #111;
-        line-height: 1.6;
+        box-shadow: 0 20px 60px rgba(70, 130, 180, 0.15), 
+                    0 0 1px rgba(70, 130, 180, 0.1);
+        border: 1px solid rgba(70, 130, 180, 0.08);
+        font-family: 'Inter', serif;
+        color: #1a202c;
+        line-height: 1.7;
         position: relative;
+        border-radius: 16px;
+        transition: all 0.3s ease;
+    }
+    
+    .paper-sheet:hover {
+        box-shadow: 0 25px 70px rgba(70, 130, 180, 0.2),
+                    0 0 1px rgba(70, 130, 180, 0.15);
     }
 
-    .doc-header { text-align: center; font-size: 22pt; font-weight: 900; margin-bottom: 30px; letter-spacing: 2px; }
-    .doc-info { display: flex; justify-content: space-between; font-size: 11pt; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 20px; gap:10px; flex-wrap:wrap; }
-    .doc-body { font-size: 12pt; text-align: justify; white-space: pre-line; }
-    .doc-footer { text-align: center; font-size: 20pt; font-weight: bold; margin-top: 80px; letter-spacing: 5px; }
-    .stamp { position: absolute; bottom: 85px; right: 80px; border: 3px solid #cc0000; color: #cc0000; padding: 5px 10px; font-size: 14pt; font-weight: bold; transform: rotate(-15deg); opacity: 0.8; border-radius: 5px; }
+    .doc-header { 
+        text-align: center; 
+        font-size: 24pt; 
+        font-weight: 800; 
+        margin-bottom: 35px; 
+        letter-spacing: 1.5px;
+        background: linear-gradient(135deg, #4682b4 0%, #008080 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    
+    .doc-info { 
+        display: flex; 
+        justify-content: space-between; 
+        font-size: 10.5pt; 
+        border-bottom: 2px solid #4682b4; 
+        padding-bottom: 12px; 
+        margin-bottom: 25px; 
+        gap: 12px; 
+        flex-wrap: wrap;
+        font-weight: 500;
+        color: #2d3748;
+    }
+    
+    .doc-body { 
+        font-size: 11.5pt; 
+        text-align: justify; 
+        white-space: pre-line;
+        color: #2d3748;
+        line-height: 1.8;
+    }
+    
+    .doc-footer { 
+        text-align: center; 
+        font-size: 18pt; 
+        font-weight: 700; 
+        margin-top: 80px; 
+        letter-spacing: 4px;
+        color: #4682b4;
+    }
+    
+    .stamp { 
+        position: absolute; 
+        bottom: 85px; 
+        right: 80px; 
+        border: 3px solid #cc0000; 
+        color: #cc0000; 
+        padding: 8px 14px; 
+        font-size: 13pt; 
+        font-weight: 800; 
+        transform: rotate(-12deg); 
+        opacity: 0.85; 
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: 0 4px 12px rgba(204, 0, 0, 0.15);
+    }
 
-    .agent-log { font-family: 'Consolas', monospace; font-size: 0.85rem; padding: 6px 12px; border-radius: 6px; margin-bottom: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-    .log-legal { background-color: #eff6ff; color: #1e40af; border-left: 4px solid #3b82f6; }
-    .log-search { background-color: #fff7ed; color: #c2410c; border-left: 4px solid #f97316; }
-    .log-strat { background-color: #f5f3ff; color: #6d28d9; border-left: 4px solid #8b5cf6; }
-    .log-calc { background-color: #f0fdf4; color: #166534; border-left: 4px solid #22c55e; }
-    .log-draft { background-color: #fef2f2; color: #991b1b; border-left: 4px solid #ef4444; }
-    .log-sys { background-color: #f3f4f6; color: #4b5563; border-left: 4px solid #9ca3af; }
+    /* Modern agent logs with glassmorphism */
+    .agent-log { 
+        font-family: 'Inter', 'Consolas', monospace; 
+        font-size: 0.875rem; 
+        padding: 10px 16px; 
+        border-radius: 10px; 
+        margin-bottom: 10px; 
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        transition: all 0.2s ease;
+    }
+    
+    .agent-log:hover {
+        transform: translateX(4px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    
+    .log-legal { 
+        background: linear-gradient(135deg, rgba(70, 130, 180, 0.15), rgba(70, 130, 180, 0.08)); 
+        color: #2c5282; 
+        border-left: 4px solid #4682b4;
+    }
+    
+    .log-search { 
+        background: linear-gradient(135deg, rgba(0, 128, 128, 0.15), rgba(0, 128, 128, 0.08)); 
+        color: #234e52; 
+        border-left: 4px solid #008080;
+    }
+    
+    .log-strat { 
+        background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(139, 92, 246, 0.08)); 
+        color: #553c9a; 
+        border-left: 4px solid #8b5cf6;
+    }
+    
+    .log-calc { 
+        background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(34, 197, 94, 0.08)); 
+        color: #14532d; 
+        border-left: 4px solid #22c55e;
+    }
+    
+    .log-draft { 
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.08)); 
+        color: #7f1d1d; 
+        border-left: 4px solid #ef4444;
+    }
+    
+    .log-sys { 
+        background: linear-gradient(135deg, rgba(156, 163, 175, 0.15), rgba(156, 163, 175, 0.08)); 
+        color: #374151; 
+        border-left: 4px solid #9ca3af;
+    }
+    
+    /* Enhanced buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, #4682b4 0%, #008080 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 0.75rem 1.5rem;
+        font-weight: 600;
+        font-size: 0.95rem;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(70, 130, 180, 0.3);
+    }
+    
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(70, 130, 180, 0.4);
+    }
+    
+    /* Enhanced text inputs */
+    .stTextInput > div > div > input,
+    .stTextArea > div > div > textarea {
+        border: 2px solid rgba(70, 130, 180, 0.2);
+        border-radius: 10px;
+        padding: 0.75rem 1rem;
+        font-family: 'Inter', sans-serif;
+        transition: all 0.3s ease;
+        background: rgba(255, 255, 255, 0.9);
+    }
+    
+    .stTextInput > div > div > input:focus,
+    .stTextArea > div > div > textarea:focus {
+        border-color: #4682b4;
+        box-shadow: 0 0 0 3px rgba(70, 130, 180, 0.1);
+    }
+    
+    /* Enhanced expanders */
+    .streamlit-expanderHeader {
+        background: linear-gradient(135deg, rgba(70, 130, 180, 0.08), rgba(0, 128, 128, 0.05));
+        border-radius: 10px;
+        border: 1px solid rgba(70, 130, 180, 0.15);
+        padding: 0.75rem 1rem;
+        font-weight: 600;
+        color: #2d3748;
+        transition: all 0.3s ease;
+    }
+    
+    .streamlit-expanderHeader:hover {
+        background: linear-gradient(135deg, rgba(70, 130, 180, 0.12), rgba(0, 128, 128, 0.08));
+        border-color: rgba(70, 130, 180, 0.25);
+    }
+    
+    /* Status indicators with modern design */
+    div[data-testid="stMarkdownContainer"] p {
+        font-family: 'Inter', sans-serif;
+    }
+    
+    /* Info, success, warning, error boxes */
+    .stAlert {
+        border-radius: 12px;
+        border: 1px solid rgba(70, 130, 180, 0.2);
+        backdrop-filter: blur(10px);
+    }
 
-    /* Streamlit Cloud 상단 Fork/GitHub 숨김 (버전별로 다를 수 있음) */
+    /* Streamlit Cloud 상단 숨김 */
     header [data-testid="stToolbar"] { display: none !important; }
     header [data-testid="stDecoration"] { display: none !important; }
     header { height: 0px !important; }
     footer { display: none !important; }
     div[data-testid="stStatusWidget"] { display: none !important; }
+    
+    /* Enhanced titles */
+    h1, h2, h3 {
+        font-family: 'Inter', sans-serif;
+        font-weight: 800;
+        color: #1a202c;
+    }
+    
+    h1 {
+        background: linear-gradient(135deg, #4682b4 0%, #008080 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -99,20 +320,15 @@ st.markdown(
 
 
 # ==========================================
-# 2) Utils (HTTP, Cache)
+# 2) Utils (HTTP, Cache, XML)
 # ==========================================
 def _require_requests():
     if requests is None:
-        raise RuntimeError("requests 패키지가 설치되지 않았습니다. requirements.txt에 requests를 추가하세요.")
+        raise RuntimeError("requests 패키지 미설치. requirements.txt 확인 필요.")
 
 
-def http_get(
-    url: str,
-    params: Optional[dict] = None,
-    headers: Optional[dict] = None,
-    timeout: int = HTTP_TIMEOUT,
-    retries: int = HTTP_RETRIES,
-):
+def http_get(url: str, params: Optional[dict] = None, headers: Optional[dict] = None,
+             timeout: int = HTTP_TIMEOUT, retries: int = HTTP_RETRIES):
     _require_requests()
     last_err = None
     for i in range(retries + 1):
@@ -123,17 +339,12 @@ def http_get(
         except Exception as e:
             last_err = e
             if i < retries:
-                time.sleep(0.2 * (2**i))
-    raise Exception(last_err)
+                time.sleep(0.3 * (2 ** i))
+    raise RuntimeError(f"HTTP GET 실패: {last_err}")
 
 
-def http_post(
-    url: str,
-    json_body: dict,
-    headers: Optional[dict] = None,
-    timeout: int = HTTP_TIMEOUT,
-    retries: int = HTTP_RETRIES,
-):
+def http_post(url: str, json_body: dict, headers: Optional[dict] = None,
+              timeout: int = HTTP_TIMEOUT, retries: int = HTTP_RETRIES):
     _require_requests()
     last_err = None
     for i in range(retries + 1):
@@ -144,27 +355,35 @@ def http_post(
         except Exception as e:
             last_err = e
             if i < retries:
-                time.sleep(0.2 * (2**i))
-    raise Exception(last_err)
+                time.sleep(0.3 * (2 ** i))
+    raise RuntimeError(f"HTTP POST 실패: {last_err}")
+
+
+def _safe_decode(b: bytes) -> str:
+    """UTF-8 우선, 실패 시 EUC-KR 시도"""
+    for enc in ["utf-8", "euc-kr", "cp949"]:
+        try:
+            return b.decode(enc)
+        except Exception:
+            continue
+    return b.decode("utf-8", errors="ignore")
 
 
 def _safe_et_from_bytes(b: bytes) -> ET.Element:
-    """XML 파싱이 깨질 때를 대비한 안전 파서"""
+    """XML 파싱 (인코딩 자동 감지)"""
+    text = _safe_decode(b)
     try:
-        return ET.fromstring(b)
+        return ET.fromstring(text)
     except Exception:
-        try:
-            return ET.fromstring(b.decode("utf-8", errors="ignore").encode("utf-8"))
-        except Exception as e:
-            raise e
+        cleaned = re.sub(r"[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]", "", text)
+        return ET.fromstring(cleaned)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def cached_law_search(api_id: str, law_name: str) -> str:
-    """lawSearch.do -> MST(법령일련번호) 캐시"""
     base_url = "https://www.law.go.kr/DRF/lawSearch.do"
     params = {"OC": api_id, "target": "law", "type": "XML", "query": law_name, "display": 1}
-    r = http_get(base_url, params=params, timeout=8)
+    r = http_get(base_url, params=params, timeout=10)
     root = _safe_et_from_bytes(r.content)
     law_node = root.find(".//law")
     if law_node is None:
@@ -174,42 +393,78 @@ def cached_law_search(api_id: str, law_name: str) -> str:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def cached_law_detail_xml(api_id: str, mst_id: str) -> str:
-    """lawService.do -> XML 전문 캐시"""
     service_url = "https://www.law.go.kr/DRF/lawService.do"
     params = {"OC": api_id, "target": "law", "type": "XML", "MST": mst_id}
-    r = http_get(service_url, params=params, timeout=12)
-    return r.text
+    r = http_get(service_url, params=params, timeout=15)
+    return _safe_decode(r.content)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def cached_admrul_search(api_id: str, query: str) -> str:
+    """행정규칙(훈령/예규/고시) 검색 → ID 반환"""
+    base_url = "https://www.law.go.kr/DRF/lawSearch.do"
+    params = {"OC": api_id, "target": "admrul", "type": "XML", "query": query, "display": 1}
+    r = http_get(base_url, params=params, timeout=10)
+    root = _safe_et_from_bytes(r.content)
+    admrul_node = root.find(".//admrul")
+    if admrul_node is None:
+        return ""
+    return (admrul_node.findtext("행정규칙ID") or admrul_node.findtext("admrulId") or "").strip()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def cached_admrul_detail(api_id: str, admrul_id: str) -> str:
+    """행정규칙 본문 XML 조회"""
+    service_url = "https://www.law.go.kr/DRF/lawService.do"
+    params = {"OC": api_id, "target": "admrul", "type": "XML", "ID": admrul_id}
+    r = http_get(service_url, params=params, timeout=15)
+    return _safe_decode(r.content)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_ai_search(api_id: str, query: str, top_k: int = 5) -> List[Dict[str, str]]:
+    """지능형(AIS) 검색 → 결과 목록"""
+    base_url = "https://www.law.go.kr/DRF/lawSearch.do"
+    params = {"OC": api_id, "target": "aiSearch", "type": "XML", "query": query, "display": top_k}
+    try:
+        r = http_get(base_url, params=params, timeout=12)
+        root = _safe_et_from_bytes(r.content)
+        results = []
+        for item in root.findall(".//law") or root.findall(".//search") or root.findall(".//item"):
+            title = (item.findtext("법령명") or item.findtext("제목") or item.findtext("title") or "").strip()
+            link = (item.findtext("법령링크") or item.findtext("link") or "").strip()
+            doc_type = (item.findtext("법령구분") or item.findtext("type") or "법령").strip()
+            if title:
+                results.append({"title": title, "link": link, "type": doc_type})
+        return results
+    except Exception:
+        return []
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_naver_news(query: str, top_k: int = 3) -> str:
-    """네이버 뉴스 검색 결과 캐시(10분)"""
-    g = st.secrets.get("general", {})
+    g = _safe_secrets("general")
     client_id = g.get("NAVER_CLIENT_ID")
     client_secret = g.get("NAVER_CLIENT_SECRET")
-    news_url = "https://openapi.naver.com/v1/search/news.json"
 
     if not client_id or not client_secret:
-        return "⚠️ 네이버 API 키가 없습니다. (secrets.toml: [general] NAVER_CLIENT_ID/SECRET)"
+        return "⚠️ 네이버 API 키가 없습니다."
     if not query:
         return "⚠️ 검색어가 비었습니다."
 
     headers = {"X-Naver-Client-Id": client_id, "X-Naver-Client-Secret": client_secret}
     params = {"query": query, "display": 10, "sort": "sim"}
-
-    r = http_get(news_url, params=params, headers=headers, timeout=8)
+    r = http_get("https://openapi.naver.com/v1/search/news.json", params=params, headers=headers, timeout=8)
     items = r.json().get("items", []) or []
+
     if not items:
         return f"🔍 `{query}` 관련 최신 사례가 없습니다."
 
     def clean_html(s: str) -> str:
-        if not s:
-            return ""
-        s = re.sub(r"<[^>]+>", "", s)
-        s = s.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-        return s.strip()
+        s = re.sub(r"<[^>]+>", "", s or "")
+        return s.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").strip()
 
-    lines = [f"📰 **최신 뉴스 사례 (검색어: {query})**", "---"]
+    lines = [f"📰 **최신 뉴스 (검색어: {query})**", "---"]
     for it in items[:top_k]:
         title = clean_html(it.get("title", ""))
         desc = clean_html(it.get("description", ""))
@@ -222,25 +477,17 @@ def cached_naver_news(query: str, top_k: int = 3) -> str:
 # 3) Infrastructure Services
 # ==========================================
 def _vertex_schema_from_doc_schema(doc_schema: Optional[dict]) -> Optional[dict]:
-    """Vertex responseSchema용 스키마 정규화"""
     if not doc_schema or not isinstance(doc_schema, dict):
         return None
 
-    def norm_type(t: Optional[str]) -> Optional[str]:
+    def norm_type(t):
         if not t:
             return None
-        t = str(t).lower().strip()
-        mapping = {
-            "object": "object",
-            "array": "array",
-            "string": "string",
-            "integer": "integer",
-            "number": "number",
-            "boolean": "boolean",
-        }
-        return mapping.get(t, t)
+        mapping = {"object": "object", "array": "array", "string": "string",
+                   "integer": "integer", "number": "number", "boolean": "boolean"}
+        return mapping.get(str(t).lower().strip(), str(t).lower())
 
-    def walk(s: Any) -> Any:
+    def walk(s):
         if isinstance(s, dict):
             out = {}
             if "type" in s:
@@ -263,25 +510,17 @@ def _vertex_schema_from_doc_schema(doc_schema: Optional[dict]) -> Optional[dict]
 
 
 class LLMService:
-    """
-    ✅ Vertex AI (Gemini) REST 호출
-    - service account JSON을 secrets에 넣는 방식 (Streamlit Cloud 호환)
-    - responseMimeType/responseSchema로 JSON 강제(가능한 경우)
-    - Groq는 백업(옵션)
-    """
+    """Vertex AI (Gemini) + Groq 백업"""
+
     def __init__(self):
-        g = st.secrets.get("general", {})
-        v = st.secrets.get("vertex", {})
+        g = _safe_secrets("general")
+        v = _safe_secrets("vertex")
 
         self.groq_key = g.get("GROQ_API_KEY")
         self.project_id = v.get("PROJECT_ID")
         self.location = v.get("LOCATION", "asia-northeast3")
-
-        self.vertex_models = [
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash-001",
-        ]
+        self.vertex_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-001"]
+        self.groq_models = ["llama-3.3-70b-versatile", "llama3-70b-8192"]
 
         self.creds = None
         sa_raw = v.get("SERVICE_ACCOUNT_JSON")
@@ -289,26 +528,28 @@ class LLMService:
             try:
                 sa_info = json.loads(sa_raw) if isinstance(sa_raw, str) else sa_raw
                 self.creds = service_account.Credentials.from_service_account_info(
-                    sa_info,
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                )
+                    sa_info, scopes=["https://www.googleapis.com/auth/cloud-platform"])
             except Exception:
                 self.creds = None
 
         self.groq_client = Groq(api_key=self.groq_key) if (Groq and self.groq_key) else None
 
-    def _vertex_generate(
-        self,
-        prompt: str,
-        model_name: str,
-        response_mime_type: Optional[str] = None,
-        response_schema: Optional[dict] = None,
-    ) -> str:
-        if not (self.creds and self.project_id and self.location and GoogleAuthRequest):
-            raise Exception("Vertex AI credentials/project/location not configured")
+    def _refresh_creds_safe(self):
+        """Thread-safe token refresh"""
+        with _vertex_lock:
+            if self.creds and (not self.creds.valid or self.creds.expired):
+                try:
+                    self.creds.refresh(GoogleAuthRequest())
+                except Exception:
+                    pass
 
-        if not self.creds.valid or self.creds.expired:
-            self.creds.refresh(GoogleAuthRequest())
+    def _vertex_generate(self, prompt: str, model_name: str,
+                         response_mime_type: Optional[str] = None,
+                         response_schema: Optional[dict] = None) -> str:
+        if not (self.creds and self.project_id and self.location and GoogleAuthRequest):
+            raise RuntimeError("Vertex AI 미설정")
+
+        self._refresh_creds_safe()
 
         model_path = f"projects/{self.project_id}/locations/{self.location}/publishers/google/models/{model_name}"
         url = f"https://aiplatform.googleapis.com/v1/{model_path}:generateContent"
@@ -319,21 +560,14 @@ class LLMService:
         if response_schema:
             gen_cfg["responseSchema"] = response_schema
 
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": gen_cfg,
-        }
+        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": gen_cfg}
+        headers = {"Authorization": f"Bearer {self.creds.token}", "Content-Type": "application/json"}
 
-        headers = {
-            "Authorization": f"Bearer {self.creds.token}",
-            "Content-Type": "application/json",
-        }
-
-        r = http_post(url, json_body=payload, headers=headers, timeout=30, retries=1)
+        r = http_post(url, json_body=payload, headers=headers, timeout=VERTEX_TIMEOUT, retries=1)
         data = r.json()
 
         if isinstance(data, dict) and data.get("error"):
-            raise Exception(data["error"].get("message", "Vertex error"))
+            raise RuntimeError(data["error"].get("message", "Vertex error"))
 
         try:
             return data["candidates"][0]["content"]["parts"][0].get("text", "") or ""
@@ -343,15 +577,14 @@ class LLMService:
     def _generate_groq(self, prompt: str) -> str:
         if not self.groq_client:
             return ""
-        try:
-            completion = self.groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-            )
-            return completion.choices[0].message.content or ""
-        except Exception:
-            return ""
+        for model in self.groq_models:
+            try:
+                completion = self.groq_client.chat.completions.create(
+                    model=model, messages=[{"role": "user", "content": prompt}], temperature=0.1)
+                return completion.choices[0].message.content or ""
+            except Exception:
+                continue
+        return ""
 
     def generate_text(self, prompt: str) -> str:
         for m in self.vertex_models:
@@ -361,31 +594,22 @@ class LLMService:
                     return out
             except Exception:
                 continue
-
         out = self._generate_groq(prompt)
         if out and out.strip():
             return out
-
-        return "시스템 오류: LLM 연결 실패 (Vertex/Groq 설정 확인 필요)"
+        return "⚠️ LLM 연결 실패 (Vertex/Groq 설정 확인)"
 
     def generate_json(self, prompt: str, schema: Optional[dict] = None) -> Optional[dict]:
         response_schema = _vertex_schema_from_doc_schema(schema)
 
-        # 1) Vertex: JSON 강제
         for m in self.vertex_models:
             try:
-                txt = (self._vertex_generate(
-                    prompt=prompt,
-                    model_name=m,
-                    response_mime_type="application/json",
-                    response_schema=response_schema,
-                ) or "").strip()
+                txt = (self._vertex_generate(prompt, m, "application/json", response_schema) or "").strip()
                 if txt:
                     return json.loads(txt)
             except Exception:
                 continue
 
-        # 2) 백업 파싱
         def _try_parse(txt: str) -> Optional[dict]:
             txt = (txt or "").strip()
             if not txt:
@@ -400,22 +624,21 @@ class LLMService:
             except Exception:
                 return None
 
-        txt = self.generate_text(prompt + "\n\n반드시 JSON만 출력. 설명/서론/코드블록/마크다운 금지.")
-        j = _try_parse(txt)
-        if j is not None:
-            return j
+        for attempt in range(2):
+            suffix = "\n\n반드시 JSON만 출력." if attempt == 0 else "\n\n순수 JSON 외의 문자 금지."
+            txt = self.generate_text(prompt + suffix)
+            j = _try_parse(txt)
+            if j is not None:
+                return j
 
-        txt2 = self.generate_text(
-            "너의 출력은 파서로 바로 json.loads() 될 예정이다.\n"
-            "따라서 순수 JSON 외의 문자는 1글자도 출력하면 안 된다.\n\n" + prompt
-        )
-        return _try_parse(txt2)
+        return None
 
 
 class SearchService:
-    """뉴스 중심 경량 검색(네이버 API + 캐시)"""
+    """뉴스 검색(네이버 API)"""
+
     def _extract_keywords_llm(self, situation: str) -> str:
-        prompt = f"상황: '{situation}'\n뉴스 검색을 위한 핵심 키워드 2개만 콤마로 구분해 출력."
+        prompt = f"상황: '{situation}'\n뉴스 검색 키워드 2개만 콤마로 구분 출력."
         try:
             res = (llm_service.generate_text(prompt) or "").strip()
             return re.sub(r'[".?]', "", res)
@@ -426,7 +649,7 @@ class SearchService:
         try:
             return cached_naver_news(query=query, top_k=top_k)
         except Exception as e:
-            return f"검색 중 오류: {str(e)}"
+            return f"검색 오류: {e}"
 
     def search_precedents(self, situation: str, top_k: int = 3) -> str:
         keywords = self._extract_keywords_llm(situation)
@@ -434,55 +657,53 @@ class SearchService:
 
 
 class DatabaseService:
-    """
-    ✅ Supabase Auth 로그인 + 데이터 관리 (RLS 권장)
-    - 로그인 성공 시: sb_access_token/sb_user_email/sb_user_id 저장
-    - SERVICE_ROLE_KEY가 있으면 관리자 모드(전체조회/삭제 가능)
-    """
+    """Supabase Auth + DB (supabase-py 2.x 호환)"""
+
     def __init__(self):
-        s = st.secrets.get("supabase", {})
+        s = _safe_secrets("supabase")
         self.url = s.get("SUPABASE_URL")
         self.anon_key = s.get("SUPABASE_ANON_KEY") or s.get("SUPABASE_KEY")
-        self.service_key = s.get("SUPABASE_SERVICE_ROLE_KEY")  # optional
+        self.service_key = s.get("SUPABASE_SERVICE_ROLE_KEY")
 
         self.is_active = False
         self.auth_client = None
-        self.base_client = None
+        self.admin_client = None
 
         if create_client is None:
-            self.is_active = False
             return
 
         try:
             if self.url and self.anon_key:
                 self.auth_client = create_client(self.url, self.anon_key)
-                self.base_client = create_client(self.url, self.service_key or self.anon_key)
+                if self.service_key:
+                    self.admin_client = create_client(self.url, self.service_key)
                 self.is_active = True
         except Exception:
             self.is_active = False
 
     def is_logged_in(self) -> bool:
-        return bool(st.session_state.get("sb_access_token")) and bool(st.session_state.get("sb_user_email"))
+        return bool(st.session_state.get("sb_access_token") and st.session_state.get("sb_user_email"))
+
+    def _is_korea_kr_email(self, email: str) -> bool:
+        return email.lower().endswith(KOREA_DOMAIN)
 
     def sign_in(self, email: str, password: str) -> dict:
         if not self.is_active or not self.auth_client:
             return {"ok": False, "msg": "Supabase 연결 실패"}
         try:
             resp = self.auth_client.auth.sign_in_with_password({"email": email, "password": password})
-
-            session = getattr(resp, "session", None) or (resp.get("session") if isinstance(resp, dict) else None)
-            user = getattr(resp, "user", None) or (resp.get("user") if isinstance(resp, dict) else None)
+            session = getattr(resp, "session", None)
+            user = getattr(resp, "user", None)
 
             access_token = getattr(session, "access_token", None) if session else None
-            refresh_token = getattr(session, "refresh_token", None) if session else None
             user_email = getattr(user, "email", None) if user else None
             user_id = getattr(user, "id", None) if user else None
 
             if not access_token or not user_email:
-                return {"ok": False, "msg": "로그인 응답 파싱 실패(토큰 없음)"}
+                return {"ok": False, "msg": "로그인 응답 파싱 실패"}
 
             st.session_state["sb_access_token"] = access_token
-            st.session_state["sb_refresh_token"] = refresh_token or ""
+            st.session_state["sb_refresh_token"] = getattr(session, "refresh_token", "") if session else ""
             st.session_state["sb_user_email"] = user_email
             st.session_state["sb_user_id"] = user_id or ""
             return {"ok": True, "msg": "로그인 성공"}
@@ -502,82 +723,40 @@ class DatabaseService:
         except Exception as e:
             return {"ok": False, "msg": f"로그아웃 실패: {e}"}
 
-    def _client_with_token(self, token: str):
-        """
-        supabase-py 버전에 따라 토큰 적용 방식이 다름.
-        최대한 많은 케이스를 커버하는 fallback 체인.
-        """
-        c = self.base_client
-        if not c or not token:
-            return None
-
-        try:
-            if hasattr(c, "postgrest") and hasattr(c.postgrest, "auth"):
-                c.postgrest.auth(token)
-                return c
-        except Exception:
-            pass
-
-        try:
-            if hasattr(c, "_postgrest") and hasattr(c._postgrest, "auth"):
-                c._postgrest.auth(token)
-                return c
-        except Exception:
-            pass
-
-        try:
-            from supabase.lib.client_options import ClientOptions  # type: ignore
-            opts = ClientOptions(headers={"Authorization": f"Bearer {token}", "apikey": self.anon_key})
-            return create_client(self.url, self.anon_key, options=opts)
-        except Exception:
-            pass
-
-        return c
-
     def _get_db_client(self):
         if not self.is_active:
             return None
-
-        if self.service_key:
-            return self.base_client
-
+        if self.admin_client:
+            return self.admin_client
         token = st.session_state.get("sb_access_token")
-        if not token:
+        if not token or not self.url or not self.anon_key:
             return None
-        return self._client_with_token(token)
+        if ClientOptions is None:
+            return self.auth_client
+        try:
+            opts = ClientOptions(headers={"Authorization": f"Bearer {token}", "apikey": self.anon_key})
+            return create_client(self.url, self.anon_key, options=opts)
+        except Exception:
+            return self.auth_client
 
     def _pack_summary(self, res: dict, followup: dict) -> dict:
-        return {
-            "meta": res.get("meta"),
-            "strategy": res.get("strategy"),
-            "search_initial": res.get("search"),
-            "law_initial": res.get("law"),
-            "document_content": res.get("doc"),
-            "followup": followup,
-            "timings": res.get("timings"),
-        }
+        return {"meta": res.get("meta"), "strategy": res.get("strategy"), "search_initial": res.get("search"),
+                "law_initial": res.get("law"), "document_content": res.get("doc"), "followup": followup,
+                "timings": res.get("timings")}
 
     def insert_initial_report(self, res: dict) -> dict:
         c = self._get_db_client()
         if not c:
-            return {"ok": False, "msg": "DB 저장 불가(로그인 필요 또는 RLS/권한 설정 필요)", "id": None}
+            return {"ok": False, "msg": "DB 저장 불가(로그인 필요)", "id": None}
         try:
             followup = {"count": 0, "messages": [], "extra_context": ""}
-            data = {
-                "situation": res.get("situation", ""),
-                "law_name": res.get("law", ""),
-                "summary": self._pack_summary(res, followup),
-                "user_email": st.session_state.get("sb_user_email") or None,
-                "user_id": st.session_state.get("sb_user_id") or None,
-            }
+            data = {"situation": res.get("situation", ""), "law_name": res.get("law", ""),
+                    "summary": self._pack_summary(res, followup),
+                    "user_email": st.session_state.get("sb_user_email"),
+                    "user_id": st.session_state.get("sb_user_id")}
             resp = c.table("law_reports").insert(data).execute()
-            inserted_id = None
-            try:
-                d = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None)
-                if isinstance(d, list) and d:
-                    inserted_id = d[0].get("id")
-            except Exception:
-                inserted_id = None
+            d = getattr(resp, "data", None)
+            inserted_id = d[0].get("id") if isinstance(d, list) and d else None
             return {"ok": True, "msg": "DB 저장 성공", "id": inserted_id}
         except Exception as e:
             return {"ok": False, "msg": f"DB 저장 실패: {e}", "id": None}
@@ -585,29 +764,21 @@ class DatabaseService:
     def update_followup(self, report_id, res: dict, followup: dict) -> dict:
         c = self._get_db_client()
         if not c:
-            return {"ok": False, "msg": "DB 업데이트 불가(로그인 필요 또는 권한설정 필요)"}
-
+            return {"ok": False, "msg": "DB 업데이트 불가"}
         summary = self._pack_summary(res, followup)
-
-        if report_id is not None:
+        if report_id:
             try:
                 c.table("law_reports").update({"summary": summary}).eq("id", report_id).execute()
                 return {"ok": True, "msg": "DB 업데이트 성공"}
             except Exception:
                 pass
-
         try:
-            data = {
-                "situation": res.get("situation", ""),
-                "law_name": res.get("law", ""),
-                "summary": summary,
-                "user_email": st.session_state.get("sb_user_email") or None,
-                "user_id": st.session_state.get("sb_user_id") or None,
-            }
+            data = {"situation": res.get("situation", ""), "law_name": res.get("law", ""), "summary": summary,
+                    "user_email": st.session_state.get("sb_user_email"), "user_id": st.session_state.get("sb_user_id")}
             c.table("law_reports").insert(data).execute()
-            return {"ok": True, "msg": "DB 업데이트 실패 → 신규 저장(fallback) 완료"}
+            return {"ok": True, "msg": "DB 신규 저장(fallback)"}
         except Exception as e:
-            return {"ok": False, "msg": f"DB 업데이트/저장 실패: {e}"}
+            return {"ok": False, "msg": f"DB 실패: {e}"}
 
     def list_reports(self, limit: int = 50, keyword: str = "") -> list:
         c = self._get_db_client()
@@ -618,8 +789,7 @@ class DatabaseService:
             if keyword:
                 q = q.ilike("situation", f"%{keyword}%")
             resp = q.execute()
-            data = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None)
-            return data or []
+            return getattr(resp, "data", None) or []
         except Exception:
             return []
 
@@ -629,10 +799,8 @@ class DatabaseService:
             return None
         try:
             resp = c.table("law_reports").select("*").eq("id", report_id).limit(1).execute()
-            data = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None)
-            if isinstance(data, list) and data:
-                return data[0]
-            return None
+            d = getattr(resp, "data", None)
+            return d[0] if isinstance(d, list) and d else None
         except Exception:
             return None
 
@@ -648,57 +816,125 @@ class DatabaseService:
 
 
 class LawOfficialService:
-    def __init__(self):
-        self.api_id = st.secrets.get("general", {}).get("LAW_API_ID")
+    """국가법령정보센터 API"""
 
-    def _make_current_link(self, mst_id: str) -> Optional[str]:
+    def __init__(self):
+        self.api_id = _safe_secrets("general").get("LAW_API_ID")
+
+    def _make_link(self, mst_id: str) -> Optional[str]:
         if not self.api_id or not mst_id:
             return None
         return f"https://www.law.go.kr/DRF/lawService.do?OC={self.api_id}&target=law&MST={mst_id}&type=HTML"
 
     def get_law_text(self, law_name: str, article_num: Optional[int] = None, return_link: bool = False):
         if not self.api_id:
-            msg = "⚠️ API ID(OC)가 설정되지 않았습니다. (secrets.toml: [general] LAW_API_ID)"
+            msg = "⚠️ LAW_API_ID 미설정"
             return (msg, None) if return_link else msg
 
         try:
             mst_id = cached_law_search(self.api_id, law_name) or ""
             if not mst_id:
-                msg = f"🔍 '{law_name}'에 대한 검색 결과가 없습니다."
+                msg = f"🔍 '{law_name}' 검색 결과 없음"
                 return (msg, None) if return_link else msg
         except Exception as e:
-            msg = f"API 검색 중 오류: {e}"
+            msg = f"API 검색 오류: {e}"
             return (msg, None) if return_link else msg
 
-        current_link = self._make_current_link(mst_id)
+        link = self._make_link(mst_id)
 
         try:
             xml_text = cached_law_detail_xml(self.api_id, mst_id)
-            root_detail = _safe_et_from_bytes(xml_text.encode("utf-8", errors="ignore"))
+            root = _safe_et_from_bytes(xml_text.encode("utf-8", errors="ignore"))
 
             if article_num:
                 target = str(article_num)
-                for article in root_detail.findall(".//조문단위"):
-                    jo_num_tag = article.find("조문번호")
-                    jo_content_tag = article.find("조문내용")
-                    if jo_num_tag is None or jo_content_tag is None:
+                for art in root.findall(".//조문단위"):
+                    jo_num = art.find("조문번호")
+                    jo_content = art.find("조문내용")
+                    if jo_num is None or jo_content is None:
                         continue
+                    num_txt = (jo_num.text or "").strip()
+                    if num_txt == target or num_txt.startswith(target):
+                        result = f"[{law_name} 제{num_txt}조]\n" + _escape((jo_content.text or "").strip())
+                        for hang in art.findall(".//항"):
+                            hc = hang.find("항내용")
+                            if hc is not None and (hc.text or "").strip():
+                                result += f"\n  - {(hc.text or '').strip()}"
+                        return (result, link) if return_link else result
 
-                    current_num = (jo_num_tag.text or "").strip()
-                    if current_num == target or current_num.startswith(target):
-                        target_text = f"[{law_name} 제{current_num}조 전문]\n" + _escape((jo_content_tag.text or "").strip())
-                        for hang in article.findall(".//항"):
-                            hang_content = hang.find("항내용")
-                            if hang_content is not None and (hang_content.text or "").strip():
-                                target_text += f"\n  - {(hang_content.text or '').strip()}"
-                        return (target_text, current_link) if return_link else target_text
-
-            msg = f"✅ '{law_name}'이(가) 확인되었습니다.\n(상세 조문 자동 추출 실패 또는 조문번호 미지정)\n🔗 현행 원문: {current_link or '-'}"
-            return (msg, current_link) if return_link else msg
-
+            msg = f"✅ '{law_name}' 확인됨 (조문 자동추출 실패)\n🔗 {link or '-'}"
+            return (msg, link) if return_link else msg
         except Exception as e:
-            msg = f"상세 법령 파싱 실패: {e}"
-            return (msg, current_link) if return_link else msg
+            msg = f"법령 파싱 실패: {e}"
+            return (msg, link) if return_link else msg
+
+    def get_admrul_text(self, name: str, return_link: bool = False):
+        """행정규칙(훈령/예규/고시) 조회"""
+        if not self.api_id:
+            msg = "⚠️ LAW_API_ID 미설정"
+            return (msg, None) if return_link else msg
+
+        try:
+            admrul_id = cached_admrul_search(self.api_id, name) or ""
+            if not admrul_id:
+                msg = f"🔍 '{name}' 행정규칙 검색 결과 없음"
+                return (msg, None) if return_link else msg
+        except Exception as e:
+            msg = f"행정규칙 검색 오류: {e}"
+            return (msg, None) if return_link else msg
+
+        link = f"https://www.law.go.kr/DRF/lawService.do?OC={self.api_id}&target=admrul&ID={admrul_id}&type=HTML"
+
+        try:
+            xml_text = cached_admrul_detail(self.api_id, admrul_id)
+            root = _safe_et_from_bytes(xml_text.encode("utf-8", errors="ignore"))
+
+            title = (root.findtext(".//행정규칙명") or root.findtext(".//admrulNm") or name).strip()
+            content = (root.findtext(".//본문") or root.findtext(".//content") or "").strip()
+
+            if content:
+                preview = content[:800] + ("..." if len(content) > 800 else "")
+                result = f"[{title}]\n{preview}\n🔗 {link}"
+                return (result, link) if return_link else result
+
+            msg = f"✅ '{title}' 확인됨 (본문 추출 실패)\n🔗 {link}"
+            return (msg, link) if return_link else msg
+        except Exception as e:
+            msg = f"행정규칙 파싱 실패: {e}"
+            return (msg, link) if return_link else msg
+
+    def ai_search(self, query: str, top_k: int = 5) -> str:
+        """지능형(AIS) 검색 결과 반환"""
+        if not self.api_id:
+            return "⚠️ LAW_API_ID 미설정"
+
+        try:
+            results = cached_ai_search(self.api_id, query, top_k)
+            if not results:
+                return f"🔍 '{query}' 지능형 검색 결과 없음"
+
+            lines = [f"🔎 **지능형 검색 결과 ('{query}')**", "---"]
+            for i, r in enumerate(results[:top_k], 1):
+                title = r.get("title", "")
+                link = r.get("link", "")
+                doc_type = r.get("type", "")
+                if link:
+                    lines.append(f"{i}. [{title}]({link}) ({doc_type})")
+                else:
+                    lines.append(f"{i}. {title} ({doc_type})")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"지능형 검색 오류: {e}"
+
+    @staticmethod
+    def detect_doc_type(name: str) -> str:
+        """이름에서 문서 유형 추론: law vs admrul"""
+        admrul_keywords = ["훈령", "예규", "고시", "지침", "요령", "규정", "기준", "지시", "공고"]
+        name_lower = name.lower()
+        for kw in admrul_keywords:
+            if kw in name_lower:
+                return "admrul"
+        return "law"
 
 
 # ==========================================
@@ -717,15 +953,11 @@ llm_service, search_service, db_service, law_api_service = _get_services()
 class LegalAgents:
     @staticmethod
     def researcher(situation: str) -> str:
-        prompt_extract = f"""
-상황: "{situation}"
+        prompt_extract = f"""상황: "{situation}"
+위 민원 처리를 위해 법적 근거로 삼아야 할 핵심 대한민국 법령/행정규칙(훈령·예규·고시)과 조문 번호를 중요도 순 최대 3개 JSON 리스트로 추출.
+- doc_type: "law"(법/시행령/시행규칙) 또는 "admrul"(훈령/예규/고시/지침)
+형식: [{{"name": "도로교통법", "article_num": 32, "doc_type": "law"}}, {{"name": "OO고시", "article_num": null, "doc_type": "admrul"}}]"""
 
-위 민원 처리를 위해 법적 근거로 삼아야 할 핵심 대한민국 법령과 조문 번호를
-**중요도 순으로 최대 3개까지** JSON 리스트로 추출하시오.
-
-형식: [{{"law_name": "도로교통법", "article_num": 32}}, ...]
-* 법령명은 정식 명칭 사용. 조문 번호 불명확하면 null.
-"""
         search_targets: List[Dict[str, Any]] = []
         try:
             extracted = llm_service.generate_json(prompt_extract)
@@ -734,106 +966,82 @@ class LegalAgents:
             elif isinstance(extracted, dict):
                 search_targets = [extracted]
         except Exception:
-            search_targets = [{"law_name": "도로교통법", "article_num": None}]
+            pass
 
         if not search_targets:
-            search_targets = [{"law_name": "도로교통법", "article_num": None}]
+            search_targets = [{"name": "관련법령", "article_num": None, "doc_type": "law"}]
 
-        report_lines: List[str] = []
+        report_lines: List[str] = [f"🔍 **AI가 식별한 핵심 법령/규칙 ({len(search_targets)}건)**", "---"]
         api_success_count = 0
 
-        report_lines.append(f"🔍 **AI가 식별한 핵심 법령 ({len(search_targets)}건)**")
-        report_lines.append("---")
-
         def fetch_one(idx: int, item: Dict[str, Any]):
-            law_name = str(item.get("law_name") or "관련법령").strip()
+            name = str(item.get("name") or item.get("law_name") or "관련법령").strip()
             article_num = item.get("article_num")
+            doc_type = str(item.get("doc_type") or LawOfficialService.detect_doc_type(name)).lower()
+
             art = None
             try:
-                if article_num is not None and str(article_num).strip().isdigit():
+                if article_num and str(article_num).strip().isdigit():
                     art = int(article_num)
             except Exception:
-                art = None
+                pass
 
-            law_text, current_link = law_api_service.get_law_text(law_name, art, return_link=True)
-            return idx, law_name, art, law_text, current_link
+            if doc_type == "admrul":
+                text, link = law_api_service.get_admrul_text(name, return_link=True)
+                return idx, name, art, text, link, "admrul"
+            else:
+                text, link = law_api_service.get_law_text(name, art, return_link=True)
+                return idx, name, art, text, link, "law"
 
-        results: List[Tuple[int, str, Optional[int], str, Optional[str]]] = []
+        results: List[Tuple[int, str, Optional[int], str, Optional[str], str]] = []
         try:
-            with ThreadPoolExecutor(max_workers=min(LAW_MAX_WORKERS, max(1, len(search_targets)))) as ex:
-                futures = [ex.submit(fetch_one, idx, item) for idx, item in enumerate(search_targets)]
+            with ThreadPoolExecutor(max_workers=min(LAW_MAX_WORKERS, len(search_targets))) as ex:
+                futures = [ex.submit(fetch_one, i, it) for i, it in enumerate(search_targets)]
                 for f in as_completed(futures):
                     results.append(f.result())
             results.sort(key=lambda x: x[0])
         except Exception:
-            results = [fetch_one(idx, item) for idx, item in enumerate(search_targets)]
+            results = [fetch_one(i, it) for i, it in enumerate(search_targets)]
 
-        for idx, law_name, art, law_text, current_link in results:
-            error_keywords = ["검색 결과가 없습니다", "오류", "API ID", "실패", "파싱 실패"]
-            is_success = not any(k in (law_text or "") for k in error_keywords)
-
-            if is_success:
+        for idx, name, art, text, link, dtype in results:
+            err_kw = ["검색 결과 없음", "오류", "미설정", "실패"]
+            is_ok = not any(k in (text or "") for k in err_kw)
+            type_label = "행정규칙" if dtype == "admrul" else "법령"
+            if is_ok:
                 api_success_count += 1
-                law_title = f"[{law_name}]({current_link})" if current_link else law_name
-                header = f"✅ **{idx+1}. {law_title} 제{art if art else '?'}조 (확인됨)**"
-                content = law_text
+                title = f"[{name}]({link})" if link else name
+                art_str = f" 제{art}조" if art else ""
+                report_lines.append(f"✅ **{idx+1}. {title}{art_str}** ({type_label})\n{text}\n")
             else:
-                header = f"⚠️ **{idx+1}. {law_name} 제{art if art else '?'}조 (API 조회 실패)**"
-                content = "(국가법령정보센터에서 해당 조문을 찾지 못했습니다. 법령명이 정확한지 확인이 필요합니다.)"
-
-            report_lines.append(f"{header}\n{content}\n")
-
-        final_report = "\n".join(report_lines)
+                report_lines.append(f"⚠️ **{idx+1}. {name}** ({type_label}) - API 실패\n")
 
         if api_success_count == 0:
-            prompt_fallback = f"""
-Role: 행정 법률 전문가
-Task: 아래 상황에 적용될 법령과 조항을 찾아 설명하시오.
+            fallback_prompt = f"""Role: 행정 법률 전문가
 상황: "{situation}"
+* 경고: 외부 법령 API 연결 실패.
+반드시 [AI 추론 결과]임을 명시하고 환각 가능성 경고."""
+            ai_text = llm_service.generate_text(fallback_prompt) or ""
+            return f"⚠️ **[API 조회 실패: AI 추론]**\n(환각 가능성 있음 - 법제처 확인 필수)\n\n---\n{ai_text}"
 
-* 경고: 현재 외부 법령 API 연결이 원활하지 않습니다.
-반드시 상단에 [AI 추론 결과]임을 명시하고 환각 가능성을 경고하시오.
-"""
-            ai_fallback_text = (llm_service.generate_text(prompt_fallback) or "").strip()
-            return f"""⚠️ **[시스템 경고: API 조회 실패]**
-(국가법령정보센터 연결 실패로 AI 지식 기반 답변입니다. **환각 가능성** 있으니 법제처 확인 필수)
-
---------------------------------------------------
-{ai_fallback_text}"""
-
-        return final_report
+        return "\n".join(report_lines)
 
     @staticmethod
     def strategist(situation: str, legal_basis: str, search_results: str) -> str:
-        prompt = f"""
-당신은 행정 업무 베테랑 '주무관'입니다.
+        prompt = f"""당신은 행정 업무 베테랑 '주무관'입니다.
+[민원]: {situation}
+[법적 근거]: {legal_basis[:2000]}
+[유사 사례]: {search_results[:1000]}
 
-[민원 상황]: {situation}
-[확보된 법적 근거]:
-{legal_basis}
-
-[유사 사례/판례]:
-{search_results}
-
-위 정보를 종합하여 민원 처리 방향(Strategy)을 수립하세요.
-서론(인사말/공감/네 알겠습니다 등) 금지.
-
+처리 방향(Strategy)을 수립하세요. 서론 금지.
 1. 처리 방향
 2. 핵심 주의사항
-3. 예상 반발 및 대응
-"""
+3. 예상 반발 및 대응"""
         return llm_service.generate_text(prompt)
 
     @staticmethod
     def clerk(situation: str, legal_basis: str) -> dict:
         today = datetime.now(KST)
-        prompt = f"""
-오늘: {today.strftime('%Y-%m-%d')}
-상황: {situation}
-법령: {legal_basis}
-이행/의견제출 기간은 며칠인가?
-숫자만 출력. 모르겠으면 15.
-"""
+        prompt = f"오늘: {today.strftime('%Y-%m-%d')}\n상황: {situation}\n법령: {legal_basis[:500]}\n이행 기간 숫자만 출력. 모르면 15."
         try:
             res = (llm_service.generate_text(prompt) or "").strip()
             m = re.search(r"\d{1,3}", res)
@@ -841,72 +1049,36 @@ Task: 아래 상황에 적용될 법령과 조항을 찾아 설명하시오.
             days = max(1, min(days, 180))
         except Exception:
             days = 15
-
         deadline = today + timedelta(days=days)
-        return {
-            "today_str": today.strftime("%Y. %m. %d."),
-            "deadline_str": deadline.strftime("%Y. %m. %d."),
-            "days_added": days,
-            "doc_num": f"행정-{today.strftime('%Y')}-{int(time.time())%1000:03d}호",
-        }
+        return {"today_str": today.strftime("%Y. %m. %d."), "deadline_str": deadline.strftime("%Y. %m. %d."),
+                "days_added": days, "doc_num": f"행정-{today.strftime('%Y')}-{int(time.time())%1000:03d}호"}
 
     @staticmethod
-    def drafter(situation: str, legal_basis: str, meta_info: dict, strategy: str) -> Optional[dict]:
-        doc_schema = {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "receiver": {"type": "string"},
-                "body_paragraphs": {"type": "array", "items": {"type": "string"}},
-                "department_head": {"type": "string"},
-            },
-            "required": ["title", "receiver", "body_paragraphs", "department_head"],
-        }
+    def drafter(situation: str, legal_basis: str, meta_info: dict, strategy: str) -> dict:
+        schema = {"type": "object", "properties": {"title": {"type": "string"}, "receiver": {"type": "string"},
+                  "body_paragraphs": {"type": "array", "items": {"type": "string"}}, "department_head": {"type": "string"}},
+                  "required": ["title", "receiver", "body_paragraphs", "department_head"]}
 
-        prompt = f"""
-당신은 행정기관의 베테랑 서기입니다. 아래 정보를 바탕으로 완결된 공문서를 작성하세요.
+        prompt = f"""당신은 행정기관 서기입니다.
+[민원]: {situation}
+[법적 근거]: {legal_basis[:1500]}
+[시행일]: {meta_info.get('today_str','')} / [기한]: {meta_info.get('deadline_str','')}
+[전략]: {strategy[:800]}
 
-[입력]
-- 민원: {situation}
-- 법적 근거: {legal_basis}
-- 시행일자: {meta_info.get('today_str','')}
-- 기한: {meta_info.get('deadline_str','')} ({meta_info.get('days_added','')}일)
+공문서 JSON 출력 (title/receiver/body_paragraphs/department_head).
+본문: 경위->법적근거->처분->이의제기"""
+        doc = llm_service.generate_json(prompt, schema=schema)
 
-[전략]
-{strategy}
-
-[원칙]
-1) 본문에 법 조항 인용 필수
-2) 구조: 경위 -> 법적 근거 -> 처분 내용 -> 이의제기 절차
-3) 개인정보 마스킹('OOO')
-4) 반드시 JSON만 출력 (title/receiver/body_paragraphs/department_head)
-"""
-        doc = llm_service.generate_json(prompt, schema=doc_schema)
-
-        # 최후 방어: 파싱 실패 시 최소 템플릿
         if not isinstance(doc, dict):
-            return {
-                "title": "공문(초안)",
-                "receiver": "수신자 참조",
-                "body_paragraphs": [
-                    "1. (경위) OOO",
-                    "2. (법적 근거) OOO",
-                    "3. (처분/안내) OOO",
-                    "4. (이의제기) OOO",
-                ],
-                "department_head": "행정기관장",
-            }
+            return {"title": "공문(초안)", "receiver": "수신자 참조",
+                    "body_paragraphs": ["1. (경위)", "2. (법적 근거)", "3. (처분)", "4. (이의제기)"],
+                    "department_head": "행정기관장"}
 
         bp = doc.get("body_paragraphs")
-        if isinstance(bp, str):
-            doc["body_paragraphs"] = [bp]
-        elif not isinstance(bp, list):
-            doc["body_paragraphs"] = []
-
+        doc["body_paragraphs"] = [bp] if isinstance(bp, str) else (bp if isinstance(bp, list) else [])
         for k in ["title", "receiver", "department_head"]:
-            if k not in doc or not isinstance(doc.get(k), str):
+            if not isinstance(doc.get(k), str):
                 doc[k] = ""
-
         return doc
 
 
@@ -924,47 +1096,40 @@ def run_workflow(user_input: str) -> dict:
 
     t0 = time.perf_counter()
 
-    add_log("🔍 Phase 1: 법령 리서치 중...(병렬)", "legal")
+    add_log("🔍 Phase 1: 법령 리서치...", "legal")
     t = time.perf_counter()
     legal_basis = LegalAgents.researcher(user_input)
-    timings["law_research_sec"] = round(time.perf_counter() - t, 3)
-    add_log(f"📜 법적 근거 발견 완료 ({timings['law_research_sec']}s)", "legal")
+    timings["law_sec"] = round(time.perf_counter() - t, 2)
+    add_log(f"📜 법적 근거 완료 ({timings['law_sec']}s)", "legal")
 
-    add_log("🟩 네이버 검색 엔진 가동...(캐시)", "search")
+    add_log("🟩 뉴스 검색...", "search")
     t = time.perf_counter()
     try:
         search_results = search_service.search_precedents(user_input)
     except Exception:
-        search_results = "검색 모듈 미연결 (건너뜀)"
-    timings["news_search_sec"] = round(time.perf_counter() - t, 3)
+        search_results = "검색 모듈 미연결"
+    timings["news_sec"] = round(time.perf_counter() - t, 2)
 
-    add_log(f"🧠 Phase 2: AI 주무관이 처리 방향 수립... ({timings['news_search_sec']}s 검색완료)", "strat")
+    add_log(f"🧠 Phase 2: 처리 방향 수립... ({timings['news_sec']}s)", "strat")
     t = time.perf_counter()
     strategy = LegalAgents.strategist(user_input, legal_basis, search_results)
-    timings["strategy_sec"] = round(time.perf_counter() - t, 3)
+    timings["strat_sec"] = round(time.perf_counter() - t, 2)
 
     add_log("📅 Phase 3: 기한 산정...", "calc")
     t = time.perf_counter()
     meta_info = LegalAgents.clerk(user_input, legal_basis)
-    timings["deadline_calc_sec"] = round(time.perf_counter() - t, 3)
+    timings["calc_sec"] = round(time.perf_counter() - t, 2)
 
-    add_log("✍️ Phase 4: 공문서 생성(JSON)...", "draft")
+    add_log("✍️ Phase 4: 공문서 생성...", "draft")
     t = time.perf_counter()
     doc_data = LegalAgents.drafter(user_input, legal_basis, meta_info, strategy)
-    timings["draft_sec"] = round(time.perf_counter() - t, 3)
+    timings["draft_sec"] = round(time.perf_counter() - t, 2)
 
-    timings["total_sec"] = round(time.perf_counter() - t0, 3)
+    timings["total_sec"] = round(time.perf_counter() - t0, 2)
     log_placeholder.empty()
 
-    return {
-        "situation": user_input,
-        "doc": doc_data,
-        "meta": meta_info,
-        "law": legal_basis,
-        "search": search_results,
-        "strategy": strategy,
-        "timings": timings,
-    }
+    return {"situation": user_input, "doc": doc_data, "meta": meta_info,
+            "law": legal_basis, "search": search_results, "strategy": strategy, "timings": timings}
 
 
 # ==========================================
@@ -973,132 +1138,64 @@ def run_workflow(user_input: str) -> dict:
 def _strip_html(text: str) -> str:
     if not text:
         return ""
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
-    return text
+    text = re.sub(r"<br\s*/?>", "\n", text, re.IGNORECASE)
+    return re.sub(r"<[^>]+>", "", text)
 
 
 def build_case_context(res: dict) -> str:
     situation = res.get("situation", "")
-    law_txt = _strip_html(res.get("law", ""))
-    news_txt = _strip_html(res.get("search", ""))
-    strategy = res.get("strategy", "")
+    law_txt = _strip_html(res.get("law", ""))[:2000]
+    news_txt = _strip_html(res.get("search", ""))[:1000]
+    strategy = res.get("strategy", "")[:1000]
     doc = res.get("doc") or {}
+    bp = doc.get("body_paragraphs", [])
+    if isinstance(bp, str):
+        bp = [bp]
+    body = "\n".join([f"- {p}" for p in bp])
 
-    body_paras = doc.get("body_paragraphs", [])
-    if isinstance(body_paras, str):
-        body_paras = [body_paras]
-    body = "\n".join([f"- {p}" for p in body_paras])
-
-    ctx = f"""
-[케이스 컨텍스트]
-1) 민원 상황(원문)
-{situation}
-
-2) 적용 법령/조문(이미 확인된 내용)
-{law_txt}
-
-3) 관련 뉴스/사례(이미 조회된 내용)
-{news_txt}
-
-4) 업무 처리 방향(Strategy)
-{strategy}
-
-5) 생성된 공문서(요약)
-- 제목: {doc.get('title','')}
-- 수신: {doc.get('receiver','')}
-- 본문:
+    return f"""[케이스 컨텍스트]
+1) 민원: {situation}
+2) 법령: {law_txt}
+3) 뉴스: {news_txt}
+4) 전략: {strategy}
+5) 공문: 제목={doc.get('title','')}, 수신={doc.get('receiver','')}
 {body}
-- 발신: {doc.get('department_head','')}
 
-[규칙]
-- 기본 답변은 위 컨텍스트 범위에서만 작성.
-- 컨텍스트에 없는 법령/사례를 단정하지 말 것.
-- 사용자가 “근거 더 / 다른 조문 / 뉴스 더” 요청하면 그때만 추가 조회.
-"""
-    return ctx.strip()
+[규칙] 컨텍스트 내에서만 답변. 단정 금지. 추가 조회 필요시 명시."""
 
 
 def needs_tool_call(user_msg: str) -> dict:
     t = (user_msg or "").lower()
-    law_triggers = ["근거", "조문", "법령", "몇 조", "원문", "현행", "추가 조항", "다른 조문", "전문", "절차법", "행정절차"]
-    news_triggers = ["뉴스", "사례", "판례", "기사", "보도", "최근", "유사", "선례"]
-    return {"need_law": any(k in t for k in law_triggers), "need_news": any(k in t for k in news_triggers)}
+    law_kw = ["근거", "조문", "법령", "몇 조", "원문", "행정절차"]
+    news_kw = ["뉴스", "사례", "판례", "기사", "최근"]
+    return {"need_law": any(k in t for k in law_kw), "need_news": any(k in t for k in news_kw)}
 
 
-def plan_tool_calls_llm(user_msg: str, situation: str, known_law_text: str) -> dict:
-    schema = {
-        "type": "object",
-        "properties": {
-            "need_law": {"type": "boolean"},
-            "law_name": {"type": "string"},
-            "article_num": {"type": "integer"},
-            "need_news": {"type": "boolean"},
-            "news_query": {"type": "string"},
-            "reason": {"type": "string"},
-        },
-        "required": ["need_law", "law_name", "article_num", "need_news", "news_query", "reason"],
-    }
-
-    prompt = f"""
-너는 행정업무 보조 에이전트다. 사용자의 후속 질문을 보고, 추가 조회가 필요하면 계획을 JSON으로 만든다.
-
-[민원 상황]
-{situation}
-
-[이미 확보된 적용 법령 텍스트]
-{known_law_text[:2500]}
-
-[사용자 질문]
-{user_msg}
-
-[출력 규칙]
-- 추가 법령 조회 필요: need_law=true, law_name=정식 법령명 1개, article_num=정수(모르면 0)
-- 추가 뉴스 조회 필요: need_news=true, news_query=2~4단어 키워드(콤마 가능)
-- 불필요하면 need_law/need_news=false
-- 반드시 JSON만 출력
-"""
+def plan_tool_calls_llm(user_msg: str, situation: str, known_law: str) -> dict:
+    schema = {"type": "object", "properties": {"need_law": {"type": "boolean"}, "law_name": {"type": "string"},
+              "article_num": {"type": "integer"}, "need_news": {"type": "boolean"}, "news_query": {"type": "string"}}}
+    prompt = f"""[민원] {situation}
+[확보 법령] {known_law[:1500]}
+[질문] {user_msg}
+추가 조회 필요시 JSON 출력. need_law/law_name/article_num/need_news/news_query"""
     plan = llm_service.generate_json(prompt, schema=schema) or {}
     if not isinstance(plan, dict):
-        return {"need_law": False, "law_name": "", "article_num": 0, "need_news": False, "news_query": "", "reason": "parse failed"}
-
+        return {"need_law": False, "law_name": "", "article_num": 0, "need_news": False, "news_query": ""}
     try:
         plan["article_num"] = int(plan.get("article_num") or 0)
     except Exception:
         plan["article_num"] = 0
-
-    plan["law_name"] = str(plan.get("law_name") or "").strip()
-    plan["news_query"] = str(plan.get("news_query") or "").strip()
-    plan["reason"] = str(plan.get("reason") or "").strip()
-
-    plan["need_law"] = bool(plan.get("need_law"))
-    plan["need_news"] = bool(plan.get("need_news"))
     return plan
 
 
-def answer_followup(case_context: str, extra_context: str, chat_history: list, user_msg: str) -> str:
-    hist = chat_history[-8:]
-    hist_txt = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in hist]) if hist else "(없음)"
-
-    prompt = f"""
-너는 '케이스 고정 행정 후속 Q&A 챗봇'이다.
-
-{case_context}
-
-[추가 조회 결과(있으면)]
-{extra_context if extra_context else "(없음)"}
-
-[대화 히스토리(최근)]
-{hist_txt}
-
-[사용자 질문]
-{user_msg}
-
-[답변 규칙]
-- 케이스 컨텍스트/추가 조회 결과 범위에서만 답한다.
-- 모르면 모른다고 하고, 필요한 추가 조회 종류(법령/뉴스)를 구체적으로 말한다.
-- 서론 없이 실무형으로.
-"""
+def answer_followup(case_ctx: str, extra_ctx: str, history: list, user_msg: str) -> str:
+    hist = history[-8:]
+    hist_txt = "\n".join([f"{m['role']}: {m['content']}" for m in hist]) if hist else ""
+    prompt = f"""{case_ctx}
+[추가 조회] {extra_ctx or '없음'}
+[히스토리] {hist_txt}
+[질문] {user_msg}
+케이스 고정 답변. 서론 금지."""
     return llm_service.generate_text(prompt)
 
 
@@ -1109,25 +1206,26 @@ def render_followup_chat(res: dict):
     st.session_state.setdefault("followup_extra_context", "")
     st.session_state.setdefault("report_id", None)
 
-    current_case_id = (res.get("meta") or {}).get("doc_num", "") or "case"
-    if st.session_state["case_id"] != current_case_id:
-        st.session_state["case_id"] = current_case_id
+    current_case = (res.get("meta") or {}).get("doc_num", "") or "case"
+    if st.session_state["case_id"] != current_case:
+        st.session_state["case_id"] = current_case
         st.session_state["followup_count"] = 0
         st.session_state["followup_messages"] = []
         st.session_state["followup_extra_context"] = ""
+        st.session_state["report_id"] = st.session_state.get("report_id")
 
     remain = max(0, MAX_FOLLOWUP_Q - st.session_state["followup_count"])
-    st.info(f"후속 질문 가능 횟수: **{remain}/{MAX_FOLLOWUP_Q}**")
+    st.info(f"후속 질문: **{remain}/{MAX_FOLLOWUP_Q}**")
 
     if remain == 0:
-        st.warning("후속 질문 한도(5회)를 모두 사용했습니다. (추가 질문 불가)")
+        st.warning("후속 질문 한도(5회) 소진")
         return
 
     for m in st.session_state["followup_messages"]:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    user_q = st.chat_input("공문 결과를 바탕으로 후속 질문 (최대 5회)")
+    user_q = st.chat_input("후속 질문 (최대 5회)")
     if not user_q:
         return
 
@@ -1137,53 +1235,34 @@ def render_followup_chat(res: dict):
     with st.chat_message("user"):
         st.markdown(user_q)
 
-    case_context = build_case_context(res)
-
+    case_ctx = build_case_context(res)
     extra_ctx = st.session_state.get("followup_extra_context", "")
     tool_need = needs_tool_call(user_q)
 
     if tool_need["need_law"] or tool_need["need_news"]:
         plan = plan_tool_calls_llm(user_q, res.get("situation", ""), _strip_html(res.get("law", "")))
-
         if plan.get("need_law") and plan.get("law_name"):
-            art = plan.get("article_num", 0)
-            art = art if art > 0 else None
-            law_text, law_link = law_api_service.get_law_text(plan["law_name"], art, return_link=True)
-
-            extra_ctx += f"\n\n[추가 법령 조회]\n- 요청: {plan['law_name']} / 제{art if art else '?'}조\n{_strip_html(law_text)}"
-            if law_link:
-                extra_ctx += f"\n(현행 원문 링크: {law_link})"
-
+            art = plan.get("article_num", 0) or None
+            law_text, link = law_api_service.get_law_text(plan["law_name"], art, return_link=True)
+            extra_ctx += f"\n[추가 법령] {plan['law_name']} 제{art or '?'}조\n{_strip_html(law_text)}"
         if plan.get("need_news") and plan.get("news_query"):
-            news_txt = search_service.search_news(plan["news_query"])
-            extra_ctx += f"\n\n[추가 뉴스 조회]\n- 검색어: {plan['news_query']}\n{_strip_html(news_txt)}"
-
+            news = search_service.search_news(plan["news_query"])
+            extra_ctx += f"\n[추가 뉴스] {plan['news_query']}\n{_strip_html(news)}"
         st.session_state["followup_extra_context"] = extra_ctx
 
     with st.chat_message("assistant"):
-        with st.spinner("후속 답변 생성 중..."):
-            ans = answer_followup(
-                case_context=case_context,
-                extra_context=st.session_state.get("followup_extra_context", ""),
-                chat_history=st.session_state["followup_messages"],
-                user_msg=user_q,
-            )
+        with st.spinner("답변 생성..."):
+            ans = answer_followup(case_ctx, st.session_state.get("followup_extra_context", ""),
+                                  st.session_state["followup_messages"], user_q)
             st.markdown(ans)
 
     st.session_state["followup_messages"].append({"role": "assistant", "content": ans})
 
-    followup_payload = {
-        "count": st.session_state["followup_count"],
-        "messages": st.session_state["followup_messages"],
-        "extra_context": st.session_state.get("followup_extra_context", ""),
-    }
-    upd = db_service.update_followup(
-        report_id=st.session_state.get("report_id"),
-        res=res,
-        followup=followup_payload,
-    )
+    followup_data = {"count": st.session_state["followup_count"], "messages": st.session_state["followup_messages"],
+                     "extra_context": st.session_state.get("followup_extra_context", "")}
+    upd = db_service.update_followup(st.session_state.get("report_id"), res, followup_data)
     if not upd.get("ok"):
-        st.caption(f"DB 후속 저장 실패: {upd.get('msg')}")
+        st.caption(f"⚠️ {upd.get('msg')}")
 
 
 # ==========================================
@@ -1192,11 +1271,11 @@ def render_followup_chat(res: dict):
 def render_login_box():
     with st.expander("🔐 로그인 (Supabase Auth)", expanded=not db_service.is_logged_in()):
         if not db_service.is_active:
-            st.error("Supabase 연결이 안 됐습니다. secrets 설정을 확인하세요.")
+            st.error("Supabase 연결 실패. secrets 확인 필요.")
             return
 
         if db_service.is_logged_in():
-            st.success(f"로그인됨: {st.session_state.get('sb_user_email')}")
+            st.success(f"✅ {st.session_state.get('sb_user_email')}")
             if st.button("로그아웃", use_container_width=True):
                 out = db_service.sign_out()
                 if out.get("ok"):
@@ -1205,6 +1284,9 @@ def render_login_box():
                     st.error(out.get("msg"))
         else:
             email = st.text_input("이메일", key="login_email")
+            # @korea.kr 도메인 권장 안내
+            if email and not email.lower().endswith(KOREA_DOMAIN):
+                st.warning(f"⚠️ {KOREA_DOMAIN} 도메인 계정 권장")
             pw = st.text_input("비밀번호", type="password", key="login_pw")
             if st.button("로그인", type="primary", use_container_width=True):
                 r = db_service.sign_in(email, pw)
@@ -1215,80 +1297,72 @@ def render_login_box():
 
 
 def render_data_management_panel():
-    with st.expander("🗂️ 데이터 관리 (조회/삭제/다운로드)", expanded=False):
+    with st.expander("🗂️ 데이터 관리", expanded=False):
         if not db_service.is_logged_in() and not db_service.service_key:
-            st.info("로그인 후 사용 가능합니다. (또는 SERVICE_ROLE_KEY 설정 시 관리자 모드로 동작)")
+            st.info("로그인 후 사용 가능")
             return
 
-        colA, colB = st.columns([1, 1])
-        with colA:
-            keyword = st.text_input("상황 검색(키워드)", placeholder="예: 무단방치, 번호판, 과태료 ...")
-        with colB:
-            limit = st.slider("불러올 개수", 10, 200, 50, 10)
+        if db_service.service_key:
+            st.caption("⚠️ 관리자 모드 (SERVICE_ROLE_KEY)")
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            keyword = st.text_input("검색", placeholder="키워드")
+        with col2:
+            limit = st.slider("개수", 10, 100, 30, 10)
 
         rows = db_service.list_reports(limit=limit, keyword=keyword)
         if not rows:
-            st.caption("조회 결과가 없습니다.")
+            st.caption("결과 없음")
             return
 
         options = []
         id_map = {}
         for r in rows:
             rid = r.get("id")
-            created = (r.get("created_at") or "")[:19].replace("T", " ")
-            sit = (r.get("situation") or "").replace("\n", " ")
-            label = f"{created} | {str(rid)[:8]} | {sit[:60]}"
+            created = (r.get("created_at") or "")[:16].replace("T", " ")
+            sit = (r.get("situation") or "").replace("\n", " ")[:40]
+            label = f"{created} | {sit}"
             options.append(label)
             id_map[label] = rid
 
-        picked = st.selectbox("보고서 선택", options)
+        picked = st.selectbox("선택", options)
         report_id = id_map.get(picked)
-
         detail = db_service.get_report(report_id) if report_id else None
+
         if not detail:
-            st.warning("상세 조회 실패")
             return
 
-        st.markdown("#### 상세(JSON)")
         st.json(detail)
-
-        jtxt = json.dumps(detail, ensure_ascii=False, indent=2)
-        c1, c2 = st.columns([1, 1])
+        c1, c2 = st.columns(2)
         with c1:
-            st.download_button(
-                "⬇️ JSON 다운로드",
-                data=jtxt.encode("utf-8"),
-                file_name=f"law_report_{report_id}.json",
-                mime="application/json",
-                use_container_width=True,
-            )
+            st.download_button("⬇️ JSON", json.dumps(detail, ensure_ascii=False, indent=2).encode(),
+                               f"report_{report_id}.json", "application/json", use_container_width=True)
         with c2:
             if st.button("🗑️ 삭제", use_container_width=True):
                 r = db_service.delete_report(report_id)
+                st.success("삭제됨") if r.get("ok") else st.error(r.get("msg"))
                 if r.get("ok"):
-                    st.success("삭제 완료")
                     st.rerun()
-                else:
-                    st.error(r.get("msg"))
 
 
 # ==========================================
-# 9) UI
+# 9) Main UI
 # ==========================================
 def main():
     with st.sidebar:
         st.markdown("### ✅ 시스템 상태")
-        g = st.secrets.get("general", {})
-        v = st.secrets.get("vertex", {})
-        s = st.secrets.get("supabase", {})
+        g = _safe_secrets("general")
+        v = _safe_secrets("vertex")
+        s = _safe_secrets("supabase")
 
         st.write("법령 API:", "✅" if g.get("LAW_API_ID") else "❌")
-        st.write("네이버 뉴스 API:", "✅" if (g.get("NAVER_CLIENT_ID") and g.get("NAVER_CLIENT_SECRET")) else "❌")
-        st.write("Vertex SA JSON:", "✅" if v.get("SERVICE_ACCOUNT_JSON") else "❌")
-        st.write("Supabase URL/KEY:", "✅" if (s.get("SUPABASE_URL") and (s.get("SUPABASE_ANON_KEY") or s.get("SUPABASE_KEY"))) else "❌")
+        st.write("네이버 API:", "✅" if (g.get("NAVER_CLIENT_ID") and g.get("NAVER_CLIENT_SECRET")) else "❌")
+        st.write("Vertex AI:", "✅" if v.get("SERVICE_ACCOUNT_JSON") else "❌")
+        st.write("Supabase:", "✅" if (s.get("SUPABASE_URL") and (s.get("SUPABASE_ANON_KEY") or s.get("SUPABASE_KEY"))) else "❌")
         if db_service.service_key:
-            st.caption("관리자 모드: SERVICE_ROLE_KEY 사용 중")
-        st.caption("⚠️ 민감정보(성명/연락처/주소/차량번호)는 입력 금지")
+            st.caption("⚠️ 관리자 모드")
+        st.caption("⚠️ 개인정보(성명/연락처/주소) 입력 금지")
 
     col_left, col_right = st.columns([1, 1.2])
 
@@ -1296,118 +1370,55 @@ def main():
         render_login_box()
         render_data_management_panel()
 
-        st.title("🏢 AI 행정관 Pro 충주시청")
-        st.caption("문의 kim0395kk@korea.kr \n 세계최초 행정 Govable AI 에이전트")
+        st.title("🏢 AI 행정관 Pro")
+        st.caption("문의: kim0395kk@korea.kr | Govable AI")
         st.markdown("---")
 
         st.markdown("### 🗣️ 업무 지시")
-        user_input = st.text_area(
-            "업무 내용",
-            height=150,
-            placeholder="예시 \n- 상황: (무슨 일 / 어디 / 언제 / 증거 유무...) \n- 의도: (확인하고 싶은 쟁점: 요건/절차/근거) \n- 요청: (원하는 결과물: 공문 종류/회신/사전통지 등)",
-            label_visibility="collapsed",
-        )
+        user_input = st.text_area("업무 내용", height=140, label_visibility="collapsed",
+            placeholder="예시\n- 상황: (무슨 일 / 어디 / 언제)\n- 의도: (확인 쟁점)\n- 요청: (공문 종류)")
 
-        if st.button("⚡ 스마트 분석 시작", type="primary", use_container_width=True):
+        if st.button("⚡ 스마트 분석", type="primary", use_container_width=True):
             if not user_input:
-                st.warning("내용을 입력해주세요.")
+                st.warning("내용 입력 필요")
             else:
                 try:
-                    with st.spinner("AI 에이전트 팀이 협업 중입니다..."):
+                    with st.spinner("AI 에이전트 협업 중..."):
                         res = run_workflow(user_input)
-
                         ins = db_service.insert_initial_report(res)
                         res["save_msg"] = ins.get("msg")
                         st.session_state["report_id"] = ins.get("id")
-
                         st.session_state["workflow_result"] = res
                 except Exception as e:
-                    st.error(f"시스템 오류 발생: {e}")
+                    st.error(f"오류: {e}")
 
         if "workflow_result" in st.session_state:
             res = st.session_state["workflow_result"]
             st.markdown("---")
-
             if "성공" in (res.get("save_msg") or ""):
                 st.success(f"✅ {res['save_msg']}")
             else:
                 st.info(f"ℹ️ {res.get('save_msg','')}")
 
-            t = res.get("timings") or {}
-            if t:
-                with st.expander("⏱️ 처리 소요시간(디버그)", expanded=False):
-                    st.json(t)
+            with st.expander("⏱️ 소요시간", expanded=False):
+                st.json(res.get("timings", {}))
 
-            with st.expander("✅ [검토] 법령 및 유사 사례 확인", expanded=True):
-                col1, col2 = st.columns(2)
+            with st.expander("📜 법령 및 뉴스", expanded=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**법령**")
+                    law_html = res.get("law", "").replace("\n", "<br>")
+                    law_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
+                        r'<a href="\2" target="_blank">\1</a>', law_html)
+                    st.markdown(f"<div style='height:280px;overflow-y:auto;padding:10px;background:#f8fafc;border-radius:6px;font-size:0.9rem'>{law_html}</div>", unsafe_allow_html=True)
+                with c2:
+                    st.markdown("**뉴스**")
+                    news_html = res.get("search", "").replace("\n", "<br>")
+                    news_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
+                        r'<a href="\2" target="_blank">\1</a>', news_html)
+                    st.markdown(f"<div style='height:280px;overflow-y:auto;padding:10px;background:#eff6ff;border-radius:6px;font-size:0.9rem'>{news_html}</div>", unsafe_allow_html=True)
 
-                with col1:
-                    st.markdown("**📜 적용 법령 (법령명 클릭 시 현행 원문 새창)**")
-                    raw_law = res.get("law", "")
-
-                    cleaned = raw_law.replace("&lt;", "<").replace("&gt;", ">")
-                    cleaned = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", cleaned)
-                    cleaned = re.sub(
-                        r'\[([^\]]+)\]\(([^)]+)\)',
-                        r'<a href="\2" target="_blank" style="color:#2563eb; text-decoration:none; font-weight:700;">\1</a>',
-                        cleaned,
-                    )
-                    cleaned = cleaned.replace("---", "<br><br>").replace("\n", "<br>")
-
-                    st.markdown(
-                        f"""
-                        <div style="
-                            height: 300px;
-                            overflow-y: auto;
-                            padding: 15px;
-                            border-radius: 8px;
-                            border: 1px solid #e5e7eb;
-                            background: #f8fafc;
-                            font-family: 'Pretendard', sans-serif;
-                            font-size: 0.9rem;
-                            line-height: 1.6;
-                            color: #334155;
-                        ">
-                        {cleaned}
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-                with col2:
-                    st.markdown("**🟩 관련 뉴스/사례 (캐시 10분)**")
-                    raw_news = res.get("search", "")
-
-                    news_body = raw_news.replace("# ", "").replace("## ", "")
-                    news_body = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", news_body)
-                    news_html = re.sub(
-                        r"\[([^\]]+)\]\(([^)]+)\)",
-                        r'<a href="\2" target="_blank" style="color:#2563eb; text-decoration:none; font-weight:600;">\1</a>',
-                        news_body,
-                    )
-                    news_html = news_html.replace("\n", "<br>")
-
-                    st.markdown(
-                        f"""
-                        <div style="
-                            height: 300px;
-                            overflow-y: auto;
-                            padding: 15px;
-                            border-radius: 8px;
-                            border: 1px solid #dbeafe;
-                            background: #eff6ff;
-                            font-family: 'Pretendard', sans-serif;
-                            font-size: 0.9rem;
-                            line-height: 1.6;
-                            color: #1e3a8a;
-                        ">
-                        {news_html}
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-            with st.expander("🧭 [방향] 업무 처리 가이드라인", expanded=True):
+            with st.expander("🧭 처리 방향", expanded=True):
                 st.markdown(res.get("strategy", ""))
 
     with col_right:
@@ -1417,43 +1428,32 @@ def main():
             meta = res.get("meta", {})
 
             if doc:
-                html_content = f"""
-<div class="paper-sheet">
-  <div class="stamp">직인생략</div>
-  <div class="doc-header">{_escape(doc.get('title', '공 문 서'))}</div>
-  <div class="doc-info">
-    <span>문서번호: {_escape(meta.get('doc_num',''))}</span>
-    <span>시행일자: {_escape(meta.get('today_str',''))}</span>
-    <span>수신: {_escape(doc.get('receiver', '수신자 참조'))}</span>
-  </div>
-  <hr style="border: 1px solid black; margin-bottom: 30px;">
-  <div class="doc-body">
-"""
-                paragraphs = doc.get("body_paragraphs", [])
-                if isinstance(paragraphs, str):
-                    paragraphs = [paragraphs]
+                bp = doc.get("body_paragraphs", [])
+                if isinstance(bp, str):
+                    bp = [bp]
+                body_html = "".join([f"<p style='margin-bottom:12px'>{_escape(str(p))}</p>" for p in bp])
 
-                for p in paragraphs:
-                    html_content += f"<p style='margin-bottom: 15px;'>{_escape(str(p))}</p>"
-
-                html_content += f"""
-  </div>
-  <div class="doc-footer">{_escape(doc.get('department_head', '행정기관장'))}</div>
+                html = f"""<div class="paper-sheet">
+<div class="stamp">직인생략</div>
+<div class="doc-header">{_escape(doc.get('title','공문서'))}</div>
+<div class="doc-info">
+<span>문서번호: {_escape(meta.get('doc_num',''))}</span>
+<span>시행일: {_escape(meta.get('today_str',''))}</span>
+<span>수신: {_escape(doc.get('receiver',''))}</span>
 </div>
-"""
-                st.markdown(html_content, unsafe_allow_html=True)
-
+<hr style="border:1px solid black;margin-bottom:25px">
+<div class="doc-body">{body_html}</div>
+<div class="doc-footer">{_escape(doc.get('department_head',''))}</div>
+</div>"""
+                st.markdown(html, unsafe_allow_html=True)
                 st.markdown("---")
-                with st.expander("💬 [후속 질문] 케이스 고정 챗봇 (최대 5회)", expanded=True):
+                with st.expander("💬 후속 질문 (최대 5회)", expanded=True):
                     render_followup_chat(res)
             else:
-                st.warning("공문 생성 결과(doc)가 비어 있습니다. (모델 JSON 출력 실패 가능)")
+                st.warning("공문 생성 실패 (JSON 파싱 오류)")
         else:
-            st.markdown(
-                """<div style='text-align: center; padding: 100px; color: #aaa; background: white; border-radius: 10px; border: 2px dashed #ddd;'>
-<h3>📄 Document Preview</h3><p>왼쪽에서 업무를 지시하면<br>완성된 공문서가 여기에 나타납니다.</p></div>""",
-                unsafe_allow_html=True,
-            )
+            st.markdown("""<div style='text-align:center;padding:80px;color:#aaa;background:white;border-radius:10px;border:2px dashed #ddd'>
+<h3>📄 Document Preview</h3><p>왼쪽에서 업무 지시 후<br>공문서가 여기에 표시됩니다</p></div>""", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
