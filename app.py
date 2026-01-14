@@ -2034,7 +2034,7 @@ def run_workflow(user_input: str) -> dict:
     # Phase 4) 기한 산정 + 공문 생성
     add_log("📅 Phase 4: 기한 산정...", "calc")
     t = time.perf_counter()
-    meta_info = LegalAgents.clerk(user_input, legal_md)  # 기존 clerk 재사용
+    meta_info = ClerkAgent.clerk(user_input, legal_md)  # 기존 clerk 재사용
     timings["calc_sec"] = round(time.perf_counter() - t, 2)
 
     add_log("✍️ Phase 5: 공문서 생성...", "draft")
