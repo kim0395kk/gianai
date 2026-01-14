@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from html import escape as _escape
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import streamlit as st
 
@@ -1447,110 +1447,207 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
         return _json_or_fallback(prompt, schema, fallback)
 
     @staticmethod
-    def fetch_legal_materials(legal_plan: dict) -> Tuple[str, List[Dict[str, str]]]:
+    def fetch_legal_materials(legal_plan: Any) -> Tuple[str, List[Dict[str, Any]]]:
         """
-        returns:
-          - markdown string (law field에 그대로 넣을 고급 요약)
-          - raw list: [{"name","doc_type","text","link","why","priority"}]
+        legal_plan: LLM이 만든 법령/규정 설계 결과(dict 또는 JSON 문자열)
+        return:
+          - legal_md: 확보한 법령/규정 원문 요약(마크다운)
+          - sources: 실제 조회에 사용한 소스 목록(list[dict])
+        전제:
+          - 전역에 law_api_service (LawOfficialService 인스턴스)가 존재해야 함
+          - MultiAgentSystem._expand_sub_regs(law_name) 가 존재하면 하위법령 확장에 사용
         """
-        sources: List[Dict[str, Any]] = []
-        for x in legal_plan.get("top_laws", []) or []:
-            name = (x.get("name") or "").strip()
-            if isinstance(legal_plan, str):
+
+        # -----------------------------
+        # 0) legal_plan 안전 정규화
+        # -----------------------------
+        if legal_plan is None:
+            legal_plan = {}
+
+        if isinstance(legal_plan, str):
             try:
                 legal_plan = json.loads(legal_plan)
             except Exception:
                 legal_plan = {}
 
-        def _norm_list(v):
+        if not isinstance(legal_plan, dict):
+            legal_plan = {}
+
+        def _norm_list(v: Any) -> List[Any]:
             if v is None:
                 return []
             if isinstance(v, list):
                 return v
             return [v]
 
-        def _norm_top_laws(items):
-            out = []
+        def _norm_top_laws(items: Any) -> List[Dict[str, Any]]:
+            out: List[Dict[str, Any]] = []
             for x in _norm_list(items):
                 if isinstance(x, str):
-                    out.append({"name": x, "include_subregs": True, "why": "LLM 문자열 출력 정규화"})
+                    name = x.strip()
+                    if name:
+                        out.append({
+                            "name": name,
+                            "include_subregs": True,
+                            "why": "LLM 문자열 출력 정규화"
+                        })
                 elif isinstance(x, dict):
-                    out.append({
-                        "name": x.get("name") or x.get("law_name") or "",
-                        "include_subregs": bool(x.get("include_subregs", False)),
-                        "why": x.get("why", "")
-                    })
-            return [o for o in out if (o.get("name") or "").strip()]
+                    name = (x.get("name") or x.get("law_name") or "").strip()
+                    if name:
+                        out.append({
+                            "name": name,
+                            "include_subregs": bool(x.get("include_subregs", False)),
+                            "why": (x.get("why") or "").strip()
+                        })
+            return out
 
-        def _norm_top_admrul(items):
-            out = []
+        def _norm_top_admrul(items: Any) -> List[Dict[str, Any]]:
+            out: List[Dict[str, Any]] = []
             for x in _norm_list(items):
                 if isinstance(x, str):
-                    out.append({"name": x, "why": "LLM 문자열 출력 정규화"})
+                    name = x.strip()
+                    if name:
+                        out.append({
+                            "name": name,
+                            "why": "LLM 문자열 출력 정규화"
+                        })
                 elif isinstance(x, dict):
-                    out.append({"name": x.get("name") or x.get("admrul_name") or "", "why": x.get("why", "")})
-            return [o for o in out if (o.get("name") or "").strip()]
+                    name = (x.get("name") or x.get("admrul_name") or "").strip()
+                    if name:
+                        out.append({
+                            "name": name,
+                            "why": (x.get("why") or "").strip()
+                        })
+            return out
 
         legal_plan["top_laws"] = _norm_top_laws(legal_plan.get("top_laws"))
         legal_plan["top_admrul"] = _norm_top_admrul(legal_plan.get("top_admrul"))
-            if not name:
-                continue
-            sources.append({"name": name, "doc_type": "law", "article_num": 0, "why": x.get("why", ""), "priority": 5})
-            if x.get("include_subregs"):
-                for sub in MultiAgentSystem._expand_sub_regs(name):
-                    sources.append({"name": sub, "doc_type": "law", "article_num": 0, "why": "하위법령(시행) 확인", "priority": 4})
 
-        for x in legal_plan.get("top_admrul", []) or []:
+        # -----------------------------
+        # 1) 조회 대상 sources 구성 (중복 제거 + 우선순위)
+        # -----------------------------
+        sources: List[Dict[str, Any]] = []
+
+        # 법령
+        for x in (legal_plan.get("top_laws") or []):
             name = (x.get("name") or "").strip()
             if not name:
                 continue
-            sources.append({"name": name, "doc_type": "admrul", "article_num": 0, "why": x.get("why", ""), "priority": 3})
 
-        # 중복 제거
-        uniq = {}
-        for s in sources:
-            key = (s["doc_type"], s["name"])
-            if key not in uniq:
-                uniq[key] = s
-        sources = list(uniq.values())[:10]  # 과도 호출 방지
+            sources.append({
+                "name": name,
+                "doc_type": "law",
+                "article_num": 0,
+                "why": (x.get("why") or "").strip(),
+                "priority": 5,
+                "include_subregs": bool(x.get("include_subregs", False)),
+            })
 
-        raw: List[Dict[str, str]] = []
-
-        def _fetch_one(s: Dict[str, Any]) -> Dict[str, str]:
-            name = s["name"]
-            doc_type = s["doc_type"]
-            why = s.get("why", "")
-            priority = str(s.get("priority", 3))
-            if doc_type == "admrul":
-                text, link = law_api_service.get_admrul_text(name, return_link=True)
-                return {"name": name, "doc_type": doc_type, "text": text or "", "link": link or "", "why": why, "priority": priority}
-            # law
-            art = s.get("article_num") or None
-            text, link = law_api_service.get_law_text(name, art, return_link=True)
-            return {"name": name, "doc_type": doc_type, "text": text or "", "link": link or "", "why": why, "priority": priority}
-
-        with ThreadPoolExecutor(max_workers=LAW_MAX_WORKERS) as ex:
-            futs = [ex.submit(_fetch_one, s) for s in sources]
-            for f in as_completed(futs):
+            # 하위법령(시행령/시행규칙 등) 확장
+            if bool(x.get("include_subregs", False)):
                 try:
-                    raw.append(f.result())
+                    sub_regs = MultiAgentSystem._expand_sub_regs(name)
                 except Exception:
-                    continue
+                    sub_regs = []
+                for sub in (sub_regs or []):
+                    sub_name = (sub or "").strip()
+                    if not sub_name:
+                        continue
+                    sources.append({
+                        "name": sub_name,
+                        "doc_type": "law",
+                        "article_num": 0,
+                        "why": "하위법령(시행) 확인",
+                        "priority": 4,
+                        "include_subregs": False,
+                    })
 
-        # 보기 좋은 요약(법령 영역)
-        lines = ["## 📚 적용 근거(법령/하위법령/행정규칙) — 확인 가능한 원문 기반", ""]
-        for r in sorted(raw, key=lambda x: int(x.get("priority", "3")), reverse=True):
-            nm = r.get("name", "")
-            lk = r.get("link", "")
-            why = r.get("why", "")
-            typ = "행정규칙" if r.get("doc_type") == "admrul" else "법령"
-            title = f"**[{nm}]({lk})**" if lk else f"**{nm}**"
-            preview = _strip_html(r.get("text", ""))
-            preview = preview[:700] + ("..." if len(preview) > 700 else "")
-            if "검색 결과 없음" in (r.get("text") or ""):
-                preview = "⚠️ 검색 결과 없음(명칭/키워드 조정 필요)"
-            lines.append(f"- {title}  \n  - 구분: {typ}  \n  - 사용 이유: {why or '-'}  \n  - 원문 요약: {preview}\n")
-        return "\n".join(lines), raw
+        # 행정규칙(훈령/예규/고시/지침 등)
+        for x in (legal_plan.get("top_admrul") or []):
+            name = (x.get("name") or "").strip()
+            if not name:
+                continue
+            sources.append({
+                "name": name,
+                "doc_type": "admrul",
+                "article_num": 0,
+                "why": (x.get("why") or "").strip(),
+                "priority": 3
+            })
+
+        # 중복 제거: (doc_type, name) 기준으로 priority 높은 것 유지
+        dedup: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for s in sources:
+            key = (s.get("doc_type", ""), s.get("name", ""))
+            if not key[0] or not key[1]:
+                continue
+            if key not in dedup:
+                dedup[key] = s
+            else:
+                if int(s.get("priority", 0)) > int(dedup[key].get("priority", 0)):
+                    dedup[key] = s
+
+        sources = sorted(dedup.values(), key=lambda d: int(d.get("priority", 0)), reverse=True)
+
+        # -----------------------------
+        # 2) 원문 확보 (법령/행정규칙)
+        # -----------------------------
+        lines: List[str] = []
+        lines.append("## 📜 법령·규정 원문(자동 확보)")
+        lines.append("- 아래 내용은 자동 조회/요약 결과이며, 최종 판단 전 **원문 링크에서 재확인**을 권장합니다.")
+        lines.append("")
+
+        fail_count = 0
+
+        for idx, s in enumerate(sources, 1):
+            doc_type = s.get("doc_type")
+            name = s.get("name")
+            why = s.get("why", "")
+            article_num = s.get("article_num") or 0
+
+            if not name:
+                continue
+
+            # 표시용 헤더
+            head = f"### {idx}. {name}"
+            if why:
+                head += f"  \n> 선정 사유: {why}"
+            lines.append(head)
+
+            try:
+                if doc_type == "admrul":
+                    text, link = law_api_service.get_admrul_text(name, return_link=True)
+                    if link:
+                        lines.append(f"- 🔗 원문: {link}")
+                    lines.append("")
+                    lines.append(text or "⚠️ 본문 조회 결과 없음")
+                    lines.append("")
+                else:
+                    # 기본은 law
+                    art = int(article_num) if str(article_num).isdigit() and int(article_num) > 0 else None
+                    text, link = law_api_service.get_law_text(name, art, return_link=True)
+                    if link:
+                        lines.append(f"- 🔗 원문: {link}")
+                    lines.append("")
+                    lines.append(text or "⚠️ 본문 조회 결과 없음")
+                    lines.append("")
+            except Exception as e:
+                fail_count += 1
+                lines.append(f"⚠️ 조회 실패: {e}")
+                lines.append("")
+
+        if not sources:
+            lines.append("⚠️ 조회할 법령/규정이 설계되지 않았습니다. (legal_plan 비어 있음)")
+        elif fail_count == len(sources):
+            lines.append("⚠️ 모든 원문 조회가 실패했습니다. LAW_API_ID / 네트워크 / 파싱 상태를 점검하세요.")
+
+        legal_md = "\n".join(lines).strip()
+        return legal_md, sources
+
+    # (참고) 이미 있다면 이건 건드리지 마세요.
+    # @staticmethod
+    # def _expand_sub_regs(law_name: str) -> List[str]:
+    #     ...
 
     @staticmethod
     def _call_agent(role: str, case_card: dict, route: dict, legal_plan: dict, legal_md: str, news_md: str) -> str:
