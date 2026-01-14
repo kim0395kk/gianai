@@ -2114,24 +2114,7 @@ def run_workflow(user_input: str) -> dict:
         "agents": agent_out,
         "timings": timings,
     }
-    timings["total_sec"] = round(time.perf_counter() - t0, 2)
-    log_placeholder.empty()
 
-    # 기존 UI/DB 호환: law 필드=법령요약, strategy 필드=최종 SOP
-    return {
-        "situation": user_input,
-        "case_card": case_card,
-        "route": route,
-        "legal_plan": legal_plan,
-        "legal_raw": legal_raw,  # DB에 더 저장하고 싶으면 summary에 포함 가능
-        "doc": doc_data,
-        "meta": meta_info,
-        "law": legal_md,
-        "search": search_results,
-        "strategy": final_sop,
-        "agents": agent_out,
-        "timings": timings,
-    }
 
 
 
