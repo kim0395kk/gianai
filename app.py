@@ -1279,6 +1279,56 @@ class AgentPrompts:
             "required": ["title", "receiver", "body_paragraphs", "department_head"],
         }
 
+class ClerkAgent:
+    """기한/문서번호 산정 전용(안전 버전)"""
+
+    @staticmethod
+    def compute_meta(situation: str, sop_text: str = "", legal_text: str = "", mode: str = "A") -> dict:
+        today = datetime.now(KST)
+
+        # 기본 기한(업무 성격에 따라 약간 보정)
+        default_days = 15
+        if mode == "B":  # 처분/계고/조치결정 성격
+            default_days = 10
+        if mode in ["D", "E"]:  # 계획/기획 성격
+            default_days = 30
+
+        # LLM로 "숫자(일수)"만 뽑아오되, 실패 시 default로
+        prompt = f"""
+오늘: {today.strftime('%Y-%m-%d')}
+업무유형 Mode: {mode}
+
+[상황]
+{situation}
+
+[SOP(처리방향)]
+{sop_text[:1200]}
+
+[확보 법령/규정]
+{legal_text[:1200]}
+
+위 업무에서 실무적으로 잡아야 할 '처리 기한(며칠)'을 숫자만 출력.
+- 불명확하면 {default_days} 출력.
+- 1~180 범위.
+"""
+        days = default_days
+        try:
+            res = (llm_service.generate_text(prompt) or "").strip()
+            m = re.search(r"\d{1,3}", res)
+            if m:
+                days = int(m.group(0))
+        except Exception:
+            pass
+
+        days = max(1, min(days, 180))
+        deadline = today + timedelta(days=days)
+
+        return {
+            "today_str": today.strftime("%Y. %m. %d."),
+            "deadline_str": deadline.strftime("%Y. %m. %d."),
+            "days_added": days,
+            "doc_num": f"행정-{today.strftime('%Y')}-{int(time.time())%1000:03d}호",
+        }
 
 class MultiAgentSystem:
     """ROUTER → (LEGAL/ADMIN/CIVIL/BEHAVIOR/PLAN) → INTEGRATOR"""
@@ -1980,6 +2030,24 @@ def run_workflow(user_input: str) -> dict:
     t = time.perf_counter()
     doc_data = MultiAgentSystem.draft_document(case_card, legal_md, final_sop, meta_info)
     timings["draft_sec"] = round(time.perf_counter() - t, 2)
+
+    timings["total_sec"] = round(time.perf_counter() - t0, 2)
+    log_placeholder.empty()
+
+    # 기존 UI/DB 호환: law 필드=법령요약, strategy 필드=최종 SOP
+    return {
+        "situation": user_input,
+        "case_card": case_card,
+        "route": route,
+        "legal_plan": legal_plan,
+        "legal_raw": legal_raw,  # DB에 더 저장하고 싶으면 summary에 포함 가능
+        "doc": doc_data,
+        "meta": meta_info,
+        "law": legal_md,
+        "search": search_results,
+        "strategy": final_sop,
+        "agents": agent_out,
+        "timings": timings,
 
     timings["total_sec"] = round(time.perf_counter() - t0, 2)
     log_placeholder.empty()
