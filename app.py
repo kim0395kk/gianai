@@ -700,6 +700,8 @@ class LLMService:
         self.groq_key = g.get("GROQ_API_KEY")
         self.project_id = v.get("PROJECT_ID")
         self.location = v.get("LOCATION", "asia-northeast3")
+
+        # 모델은 존재/권한 이슈가 잦으니 "여러개 후보"로 돌림
         self.vertex_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-001"]
         self.groq_models = ["llama-3.3-70b-versatile", "llama3-70b-8192"]
 
@@ -709,7 +711,9 @@ class LLMService:
             try:
                 sa_info = json.loads(sa_raw) if isinstance(sa_raw, str) else sa_raw
                 self.creds = service_account.Credentials.from_service_account_info(
-                    sa_info, scopes=["https://www.googleapis.com/auth/cloud-platform"])
+                    sa_info,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
             except Exception:
                 self.creds = None
 
@@ -724,9 +728,13 @@ class LLMService:
                 except Exception:
                     pass
 
-    def _vertex_generate(self, prompt: str, model_name: str,
-                         response_mime_type: Optional[str] = None,
-                         response_schema: Optional[dict] = None) -> str:
+    def _vertex_generate(
+        self,
+        prompt: str,
+        model_name: str,
+        response_mime_type: Optional[str] = None,
+        response_schema: Optional[dict] = None,
+    ) -> str:
         if not (self.creds and self.project_id and self.location and GoogleAuthRequest):
             raise RuntimeError("Vertex AI 미설정")
 
@@ -741,7 +749,10 @@ class LLMService:
         if response_schema:
             gen_cfg["responseSchema"] = response_schema
 
-        payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "generationConfig": gen_cfg}
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": gen_cfg,
+        }
         headers = {"Authorization": f"Bearer {self.creds.token}", "Content-Type": "application/json"}
 
         r = http_post(url, json_body=payload, headers=headers, timeout=VERTEX_TIMEOUT, retries=1)
@@ -756,20 +767,75 @@ class LLMService:
             return ""
 
     def _generate_groq(self, prompt: str) -> str:
+        """Groq 텍스트 생성(백업)"""
         if not self.groq_client:
             return ""
         for model in self.groq_models:
             try:
                 completion = self.groq_client.chat.completions.create(
-                    model=model, messages=[{"role": "user", "content": prompt}], temperature=0.1)
-            try:
-                txt = (self._vertex_generate(prompt, m, "application/json", response_schema) or "").strip()
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                )
+                txt = ""
+                if completion and getattr(completion, "choices", None):
+                    txt = completion.choices[0].message.content or ""
+                txt = (txt or "").strip()
                 if txt:
-                    return json.loads(txt)
+                    return txt
             except Exception:
                 continue
+        return ""
 
-        def _try_parse(txt: str) -> Optional[dict]:
+    def generate_text(self, prompt: str) -> str:
+        """일반 텍스트 생성: Vertex 우선 → Groq 백업"""
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return ""
+
+        # Vertex 우선
+        if self.creds and self.project_id and self.location and GoogleAuthRequest:
+            for m in self.vertex_models:
+                try:
+                    txt = (self._vertex_generate(prompt, m) or "").strip()
+                    if txt:
+                        return txt
+                except Exception:
+                    continue
+
+        # Groq 백업
+        return self._generate_groq(prompt)
+
+    def generate_json(self, prompt: str, schema: Optional[dict] = None) -> Any:
+        """
+        JSON 생성:
+        1) Vertex structured output (가능하면) 시도
+        2) 실패하면 텍스트로 생성 후 JSON 파싱
+        """
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return None
+
+        response_schema = _vertex_schema_from_doc_schema(schema) if schema else None
+
+        # 1) Vertex structured output 시도
+        if self.creds and self.project_id and self.location and GoogleAuthRequest:
+            for m in self.vertex_models:
+                try:
+                    txt = (self._vertex_generate(
+                        prompt,
+                        m,
+                        response_mime_type="application/json",
+                        response_schema=response_schema,
+                    ) or "").strip()
+                    if not txt:
+                        continue
+                    return json.loads(txt)
+                except Exception:
+                    continue
+
+        # 2) 텍스트 생성 후 JSON 파싱(강제)
+        def _try_parse(txt: str) -> Optional[Any]:
             txt = (txt or "").strip()
             if not txt:
                 return None
@@ -777,11 +843,21 @@ class LLMService:
                 return json.loads(txt)
             except Exception:
                 pass
+            # JSON 덩어리만 추출
             try:
-                match = re.search(r"\{.*\}|\[.*\]", txt, re.DOTALL)
-                return json.loads(match.group(0)) if match else None
+                m = re.search(r"\{.*\}|\[.*\]", txt, re.DOTALL)
+                return json.loads(m.group(0)) if m else None
             except Exception:
                 return None
+
+        for attempt in range(2):
+            suffix = "\n\n반드시 JSON만 출력." if attempt == 0 else "\n\n순수 JSON 외의 문자 금지."
+            txt = self.generate_text(prompt + suffix)
+            j = _try_parse(txt)
+            if j is not None:
+                return j
+
+        return None
 
         for attempt in range(2):
             suffix = "\n\n반드시 JSON만 출력." if attempt == 0 else "\n\n순수 JSON 외의 문자 금지."
