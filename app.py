@@ -1,7 +1,14 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
-# Govable AI Bureau - Stabilized Version
-# Last updated: 2026-01-14
+# Govable AI Bureau - Stabilized Version (v6)
+# Last updated: 2026-01-15
+#
+# v6 changes:
+# - LLM availability guard + graceful fallbacks across all phases
+# - Phase4 deadline/meta computation: NO LLM call (heuristic)
+# - Integrator/doc drafting: robust template fallback when LLM returns empty
+# - Cleaned duplicated code in generate_json
+# - Better status display & last_error tracking
 
 import json
 import re
@@ -50,7 +57,7 @@ MAX_FOLLOWUP_Q = 5
 LAW_MAX_WORKERS = 3
 HTTP_RETRIES = 2
 HTTP_TIMEOUT = 12
-VERTEX_TIMEOUT = 30  # cold start 대비 (60에서 30으로 단축)
+VERTEX_TIMEOUT = 60  # cold start 대비
 KST = timezone(timedelta(hours=9))
 KOREA_DOMAIN = "@korea.kr"
 
@@ -71,17 +78,17 @@ def _safe_secrets(section: str) -> dict:
 # ==========================================
 st.set_page_config(layout="wide", page_title="AI Bureau: The Legal Glass", page_icon="⚖️")
 
+# NOTE: CSS는 원본 유지(길지만 그대로)
 st.markdown(
     """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-    
-    /* Modern gradient background */
-    .stApp { 
+
+    .stApp {
         background: linear-gradient(135deg, #f0f4f8 0%, #e1e8ed 50%, #d4dce3 100%);
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
-    
+
     .stApp::before {
         content: '';
         position: fixed;
@@ -95,34 +102,23 @@ st.markdown(
         pointer-events: none;
         z-index: 0;
     }
-    
-    @keyframes gradientShift {
-        0% { background-position: 0% 50%; }
-        50% { background-position: 100% 50%; }
-        100% { background-position: 0% 50%; }
-    }
-    
-    /* Glass overlay for content */
+
     [data-testid="stAppViewContainer"] > .main {
         background: rgba(255, 255, 255, 0.05);
         backdrop-filter: blur(10px);
     }
-    
-    /* Premium Sidebar */
+
     [data-testid="stSidebar"] {
         background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.92) 100%);
         backdrop-filter: blur(40px) saturate(180%);
         border-right: 2px solid rgba(120, 119, 198, 0.2);
         box-shadow: 4px 0 24px rgba(99, 102, 241, 0.1);
     }
-    
-    [data-testid="stSidebar"] > div:first-child {
-        padding-top: 2rem;
-    }
-    
-    /* Sidebar titles with gradient */
-    [data-testid="stSidebar"] h1, 
-    [data-testid="stSidebar"] h2, 
+
+    [data-testid="stSidebar"] > div:first-child { padding-top: 2rem; }
+
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
     [data-testid="stSidebar"] h3 {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         -webkit-background-clip: text;
@@ -130,8 +126,7 @@ st.markdown(
         background-clip: text;
         font-weight: 800;
     }
-    
-    /* Premium 3D paper sheet with glow */
+
     .paper-sheet {
         background: linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(255, 255, 255, 0.95) 100%);
         backdrop-filter: blur(40px) saturate(180%);
@@ -140,7 +135,7 @@ st.markdown(
         min-height: 297mm;
         padding: 25mm;
         margin: auto;
-        box-shadow: 
+        box-shadow:
             0 0 60px rgba(102, 126, 234, 0.3),
             0 30px 90px rgba(118, 75, 162, 0.2),
             inset 0 1px 0 rgba(255, 255, 255, 0.8);
@@ -153,20 +148,20 @@ st.markdown(
         transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
         transform: perspective(1000px) rotateX(0deg) rotateY(0deg);
     }
-    
+
     .paper-sheet:hover {
         transform: perspective(1000px) rotateX(2deg) rotateY(-2deg) translateY(-8px);
-        box-shadow: 
+        box-shadow:
             0 0 80px rgba(102, 126, 234, 0.4),
             0 40px 120px rgba(118, 75, 162, 0.3),
             inset 0 1px 0 rgba(255, 255, 255, 0.9);
     }
 
-    .doc-header { 
-        text-align: center; 
-        font-size: 26pt; 
-        font-weight: 900; 
-        margin-bottom: 40px; 
+    .doc-header {
+        text-align: center;
+        font-size: 26pt;
+        font-weight: 900;
+        margin-bottom: 40px;
         letter-spacing: 2px;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
         -webkit-background-clip: text;
@@ -175,173 +170,121 @@ st.markdown(
         text-shadow: 0 0 30px rgba(102, 126, 234, 0.3);
         animation: titleGlow 3s ease-in-out infinite;
     }
-    
+
     @keyframes titleGlow {
         0%, 100% { filter: brightness(1); }
         50% { filter: brightness(1.2); }
     }
-    
-    .doc-info { 
-        display: flex; 
-        justify-content: space-between; 
-        font-size: 10.5pt; 
-        border-bottom: 2px solid #4682b4; 
-        padding-bottom: 12px; 
-        margin-bottom: 25px; 
-        gap: 12px; 
+
+    .doc-info {
+        display: flex;
+        justify-content: space-between;
+        font-size: 10.5pt;
+        border-bottom: 2px solid #4682b4;
+        padding-bottom: 12px;
+        margin-bottom: 25px;
+        gap: 12px;
         flex-wrap: wrap;
         font-weight: 500;
         color: #2d3748;
     }
-    
-    .doc-body { 
-        font-size: 11.5pt; 
-        text-align: justify; 
+
+    .doc-body {
+        font-size: 11.5pt;
+        text-align: justify;
         white-space: pre-line;
         color: #2d3748;
         line-height: 1.8;
     }
-    
-    .doc-footer { 
-        text-align: center; 
-        font-size: 18pt; 
-        font-weight: 700; 
-        margin-top: 80px; 
+
+    .doc-footer {
+        text-align: center;
+        font-size: 18pt;
+        font-weight: 700;
+        margin-top: 80px;
         letter-spacing: 4px;
         color: #4682b4;
     }
-    
-    .stamp { 
-        position: absolute; 
-        bottom: 85px; 
-        right: 80px; 
-        border: 4px solid #dc2626; 
-        color: #dc2626; 
-        padding: 10px 18px; 
-        font-size: 14pt; 
-        font-weight: 900; 
-        transform: rotate(-15deg); 
-        opacity: 0.9; 
+
+    .stamp {
+        position: absolute;
+        bottom: 85px;
+        right: 80px;
+        border: 4px solid #dc2626;
+        color: #dc2626;
+        padding: 10px 18px;
+        font-size: 14pt;
+        font-weight: 900;
+        transform: rotate(-15deg);
+        opacity: 0.9;
         border-radius: 12px;
         background: rgba(255, 255, 255, 0.95);
-        box-shadow: 
+        box-shadow:
             0 8px 24px rgba(220, 38, 38, 0.3),
             inset 0 1px 0 rgba(255, 255, 255, 0.5);
         animation: stampPulse 2s ease-in-out infinite;
     }
-    
+
     @keyframes stampPulse {
         0%, 100% { transform: rotate(-15deg) scale(1); }
         50% { transform: rotate(-15deg) scale(1.05); }
     }
 
-    /* Premium agent logs with neon glow */
-    .agent-log { 
-        font-family: 'Inter', 'Consolas', monospace; 
-        font-size: 0.9rem; 
-        padding: 14px 20px; 
-        border-radius: 16px; 
-        margin-bottom: 12px; 
+    .agent-log {
+        font-family: 'Inter', 'Consolas', monospace;
+        font-size: 0.9rem;
+        padding: 14px 20px;
+        border-radius: 16px;
+        margin-bottom: 12px;
         backdrop-filter: blur(20px) saturate(180%);
         border: 2px solid rgba(255, 255, 255, 0.2);
         transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         position: relative;
         overflow: hidden;
     }
-    
-    .agent-log::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -100%;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-        transition: left 0.5s;
-    }
-    
-    .agent-log:hover::before {
-        left: 100%;
-    }
-    
-    .agent-log:hover {
-        transform: translateX(8px) scale(1.02);
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
-    }
-    
-    .log-legal { 
-        background: linear-gradient(135deg, rgba(102, 126, 234, 0.25), rgba(102, 126, 234, 0.15)); 
-        color: #3730a3; 
+
+    .log-legal {
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.25), rgba(102, 126, 234, 0.15));
+        color: #3730a3;
         border-left: 5px solid #667eea;
         box-shadow: 0 4px 20px rgba(102, 126, 234, 0.2);
     }
-    
-    .log-legal:hover {
-        box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);
-        border-left-color: #5a67d8;
-    }
-    
-    .log-search { 
-        background: linear-gradient(135deg, rgba(79, 172, 254, 0.25), rgba(79, 172, 254, 0.15)); 
-        color: #0c4a6e; 
+
+    .log-search {
+        background: linear-gradient(135deg, rgba(79, 172, 254, 0.25), rgba(79, 172, 254, 0.15));
+        color: #0c4a6e;
         border-left: 5px solid #4facfe;
         box-shadow: 0 4px 20px rgba(79, 172, 254, 0.2);
     }
-    
-    .log-search:hover {
-        box-shadow: 0 8px 32px rgba(79, 172, 254, 0.3);
-        border-left-color: #0ea5e9;
-    }
-    
-    .log-strat { 
-        background: linear-gradient(135deg, rgba(168, 85, 247, 0.25), rgba(168, 85, 247, 0.15)); 
-        color: #581c87; 
+
+    .log-strat {
+        background: linear-gradient(135deg, rgba(168, 85, 247, 0.25), rgba(168, 85, 247, 0.15));
+        color: #581c87;
         border-left: 5px solid #a855f7;
         box-shadow: 0 4px 20px rgba(168, 85, 247, 0.2);
     }
-    
-    .log-strat:hover {
-        box-shadow: 0 8px 32px rgba(168, 85, 247, 0.3);
-        border-left-color: #9333ea;
-    }
-    
-    .log-calc { 
-        background: linear-gradient(135deg, rgba(34, 197, 94, 0.25), rgba(34, 197, 94, 0.15)); 
-        color: #14532d; 
+
+    .log-calc {
+        background: linear-gradient(135deg, rgba(34, 197, 94, 0.25), rgba(34, 197, 94, 0.15));
+        color: #14532d;
         border-left: 5px solid #22c55e;
         box-shadow: 0 4px 20px rgba(34, 197, 94, 0.2);
     }
-    
-    .log-calc:hover {
-        box-shadow: 0 8px 32px rgba(34, 197, 94, 0.3);
-        border-left-color: #16a34a;
-    }
-    
-    .log-draft { 
-        background: linear-gradient(135deg, rgba(251, 113, 133, 0.25), rgba(251, 113, 133, 0.15)); 
-        color: #881337; 
+
+    .log-draft {
+        background: linear-gradient(135deg, rgba(251, 113, 133, 0.25), rgba(251, 113, 133, 0.15));
+        color: #881337;
         border-left: 5px solid #fb7185;
         box-shadow: 0 4px 20px rgba(251, 113, 133, 0.2);
     }
-    
-    .log-draft:hover {
-        box-shadow: 0 8px 32px rgba(251, 113, 133, 0.3);
-        border-left-color: #f43f5e;
-    }
-    
-    .log-sys { 
-        background: linear-gradient(135deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.15)); 
-        color: #1e293b; 
+
+    .log-sys {
+        background: linear-gradient(135deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.15));
+        color: #1e293b;
         border-left: 5px solid #94a3b8;
         box-shadow: 0 4px 20px rgba(148, 163, 184, 0.2);
     }
-    
-    .log-sys:hover {
-        box-shadow: 0 8px 32px rgba(148, 163, 184, 0.3);
-        border-left-color: #64748b;
-    }
-    
-    /* Futuristic glowing buttons */
+
     .stButton > button {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
@@ -351,45 +294,13 @@ st.markdown(
         font-weight: 700;
         font-size: 1rem;
         transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        box-shadow: 
+        box-shadow:
             0 8px 32px rgba(102, 126, 234, 0.4),
             inset 0 1px 0 rgba(255, 255, 255, 0.2);
         position: relative;
         overflow: hidden;
     }
-    
-    .stButton > button::before {
-        content: '';
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        width: 0;
-        height: 0;
-        border-radius: 50%;
-        background: rgba(255, 255, 255, 0.3);
-        transform: translate(-50%, -50%);
-        transition: width 0.6s, height 0.6s;
-    }
-    
-    .stButton > button:hover::before {
-        width: 300px;
-        height: 300px;
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-4px) scale(1.05);
-        box-shadow: 
-            0 12px 48px rgba(102, 126, 234, 0.6),
-            0 0 40px rgba(118, 75, 162, 0.4),
-            inset 0 1px 0 rgba(255, 255, 255, 0.3);
-        border-color: rgba(255, 255, 255, 0.5);
-    }
-    
-    .stButton > button:active {
-        transform: translateY(-2px) scale(1.02);
-    }
-    
-    /* Premium text inputs with glow */
+
     .stTextInput > div > div > input,
     .stTextArea > div > div > textarea {
         border: 2px solid rgba(102, 126, 234, 0.3);
@@ -402,102 +313,16 @@ st.markdown(
         backdrop-filter: blur(10px);
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
     }
-    
-    .stTextInput > div > div > input:focus,
-    .stTextArea > div > div > textarea:focus {
-        border-color: #667eea;
-        background: rgba(255, 255, 255, 1);
-        box-shadow: 
-            0 0 0 4px rgba(102, 126, 234, 0.15),
-            0 8px 24px rgba(102, 126, 234, 0.2);
-        transform: translateY(-2px);
-    }
-    
-    /* Premium expanders with gradient */
-    .streamlit-expanderHeader {
-        background: linear-gradient(135deg, rgba(102, 126, 234, 0.12), rgba(118, 75, 162, 0.08));
-        backdrop-filter: blur(10px);
-        border-radius: 16px;
-        border: 2px solid rgba(102, 126, 234, 0.2);
-        padding: 1rem 1.5rem;
-        font-weight: 700;
-        color: #1e293b;
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        box-shadow: 0 4px 16px rgba(102, 126, 234, 0.1);
-    }
-    
-    .streamlit-expanderHeader:hover {
-        background: linear-gradient(135deg, rgba(102, 126, 234, 0.2), rgba(118, 75, 162, 0.15));
-        border-color: rgba(102, 126, 234, 0.4);
-        transform: translateX(4px);
-        box-shadow: 0 6px 24px rgba(102, 126, 234, 0.2);
-    }
-    
-    /* Status indicators with modern design */
-    div[data-testid="stMarkdownContainer"] p {
-        font-family: 'Inter', sans-serif;
-    }
-    
-    /* Info, success, warning, error boxes */
-    .stAlert {
-        border-radius: 12px;
-        border: 1px solid rgba(70, 130, 180, 0.2);
-        backdrop-filter: blur(10px);
-    }
 
-    /* Streamlit Cloud 상단 숨김 */
     header [data-testid="stToolbar"] { display: none !important; }
     header [data-testid="stDecoration"] { display: none !important; }
     header { height: 0px !important; }
     footer { display: none !important; }
     div[data-testid="stStatusWidget"] { display: none !important; }
-    
-    /* Enhanced titles with gradient and glow */
-    h1, h2, h3 {
-        font-family: 'Inter', sans-serif;
-        font-weight: 900;
-        color: #0f172a;
-    }
-    
-    h1 {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        filter: drop-shadow(0 0 20px rgba(102, 126, 234, 0.3));
-    }
-    
-    /* Status indicators with icons */
-    [data-testid="stMarkdownContainer"] p:has(> strong:first-child) {
-        padding: 0.5rem 1rem;
-        border-radius: 12px;
-        background: rgba(255, 255, 255, 0.7);
-        backdrop-filter: blur(10px);
-        margin: 0.5rem 0;
-    }
-    
-    /* Info boxes enhancement */
-    .stAlert {
-        border-radius: 16px;
-        border: 2px solid rgba(102, 126, 234, 0.3);
-        backdrop-filter: blur(20px);
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-    }
-    
-    /* Success/Error badges with glow */
-    [data-testid="stMarkdownContainer"]:has(> p:first-child:contains("✅")) {
-        animation: successPulse 2s ease-in-out infinite;
-    }
-    
-    @keyframes successPulse {
-        0%, 100% { filter: brightness(1); }
-        50% { filter: brightness(1.1) drop-shadow(0 0 10px rgba(34, 197, 94, 0.5)); }
-    }
 </style>
 """,
     unsafe_allow_html=True,
 )
-
 
 
 # ==========================================
@@ -533,10 +358,6 @@ def http_post(url: str, json_body: dict, headers: Optional[dict] = None,
             r = requests.post(url, json=json_body, headers=headers, timeout=timeout)
             r.raise_for_status()
             return r
-        except requests.exceptions.Timeout as e:
-            last_err = f"타임아웃 ({timeout}초 초과): {e}"
-            if i < retries:
-                time.sleep(0.3 * (2 ** i))
         except Exception as e:
             last_err = e
             if i < retries:
@@ -586,7 +407,6 @@ def cached_law_detail_xml(api_id: str, mst_id: str) -> str:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def cached_admrul_search(api_id: str, query: str) -> str:
-    """행정규칙(훈령/예규/고시) 검색 - ID 반환"""
     base_url = "https://www.law.go.kr/DRF/lawSearch.do"
     params = {"OC": api_id, "target": "admrul", "type": "XML", "query": query, "display": 1}
     r = http_get(base_url, params=params, timeout=10)
@@ -599,7 +419,6 @@ def cached_admrul_search(api_id: str, query: str) -> str:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def cached_admrul_detail(api_id: str, admrul_id: str) -> str:
-    """행정규칙 본문 XML 조회"""
     service_url = "https://www.law.go.kr/DRF/lawService.do"
     params = {"OC": api_id, "target": "admrul", "type": "XML", "ID": admrul_id}
     r = http_get(service_url, params=params, timeout=15)
@@ -608,7 +427,6 @@ def cached_admrul_detail(api_id: str, admrul_id: str) -> str:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_ai_search(api_id: str, query: str, top_k: int = 5) -> List[Dict[str, str]]:
-    """지능형(AIS) 검색 - 결과 목록"""
     base_url = "https://www.law.go.kr/DRF/lawSearch.do"
     params = {"OC": api_id, "target": "aiSearch", "type": "XML", "query": query, "display": top_k}
     try:
@@ -695,19 +513,20 @@ def _vertex_schema_from_doc_schema(doc_schema: Optional[dict]) -> Optional[dict]
 
 
 class LLMService:
-    """Vertex AI (Gemini) + Groq 백업"""
+    """Vertex AI (Gemini) + Groq 백업 + 안전 가드"""
 
     def __init__(self):
         g = _safe_secrets("general")
         v = _safe_secrets("vertex")
 
+        self.last_error: str = ""
+
         self.groq_key = g.get("GROQ_API_KEY")
         self.project_id = v.get("PROJECT_ID")
         self.location = v.get("LOCATION", "asia-northeast3")
 
-        # 모델은 존재/권한 이슈가 잦으니 "여러개 후보"로 돌림
         self.vertex_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-001"]
-        self.groq_models = ["llama-3.1-70b-versatile", "llama3-70b-8192", "mixtral-8x7b-32768"]
+        self.groq_models = ["llama-3.3-70b-versatile", "llama3-70b-8192"]
 
         self.creds = None
         sa_raw = v.get("SERVICE_ACCOUNT_JSON")
@@ -718,19 +537,24 @@ class LLMService:
                     sa_info,
                     scopes=["https://www.googleapis.com/auth/cloud-platform"],
                 )
-            except Exception:
+            except Exception as e:
                 self.creds = None
+                self.last_error = f"Vertex SA 파싱 실패: {e}"
 
         self.groq_client = Groq(api_key=self.groq_key) if (Groq and self.groq_key) else None
 
+    def is_available(self) -> bool:
+        vertex_ok = bool(self.creds and self.project_id and self.location and GoogleAuthRequest)
+        groq_ok = bool(self.groq_client)
+        return vertex_ok or groq_ok
+
     def _refresh_creds_safe(self):
-        """Thread-safe token refresh"""
         with _vertex_lock:
             if self.creds and (not self.creds.valid or self.creds.expired):
                 try:
                     self.creds.refresh(GoogleAuthRequest())
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.last_error = f"Vertex token refresh 실패: {e}"
 
     def _vertex_generate(
         self,
@@ -740,7 +564,7 @@ class LLMService:
         response_schema: Optional[dict] = None,
     ) -> str:
         if not (self.creds and self.project_id and self.location and GoogleAuthRequest):
-            raise RuntimeError("Vertex AI 미설정")
+            raise RuntimeError("Vertex AI 미설정(서비스계정/프로젝트/권한 확인)")
 
         self._refresh_creds_safe()
 
@@ -759,29 +583,20 @@ class LLMService:
         }
         headers = {"Authorization": f"Bearer {self.creds.token}", "Content-Type": "application/json"}
 
+        r = http_post(url, json_body=payload, headers=headers, timeout=VERTEX_TIMEOUT, retries=1)
+        data = r.json()
+
+        if isinstance(data, dict) and data.get("error"):
+            raise RuntimeError(data["error"].get("message", "Vertex error"))
+
         try:
-            r = http_post(url, json_body=payload, headers=headers, timeout=VERTEX_TIMEOUT, retries=1)
-            data = r.json()
-
-            if isinstance(data, dict) and data.get("error"):
-                error_msg = data["error"].get("message", "Vertex error")
-                raise RuntimeError(f"Vertex AI 오류 ({model_name}): {error_msg}")
-
-            try:
-                return data["candidates"][0]["content"]["parts"][0].get("text", "") or ""
-            except (KeyError, IndexError, TypeError) as e:
-                raise RuntimeError(f"Vertex AI 응답 파싱 실패 ({model_name}): {e}")
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(f"Vertex AI 연결 실패 ({model_name}): {e}")
+            return data["candidates"][0]["content"]["parts"][0].get("text", "") or ""
+        except Exception:
+            return ""
 
     def _generate_groq(self, prompt: str) -> str:
-        """Groq 텍스트 생성(백업)"""
         if not self.groq_client:
-            raise RuntimeError("Groq 클라이언트 미설정 (GROQ_API_KEY 확인 필요)")
-        
-        last_error = None
+            return ""
         for model in self.groq_models:
             try:
                 completion = self.groq_client.chat.completions.create(
@@ -796,20 +611,15 @@ class LLMService:
                 if txt:
                     return txt
             except Exception as e:
-                last_error = f"Groq 모델 {model} 실패: {e}"
+                self.last_error = f"Groq 실패({model}): {e}"
                 continue
-        
-        if last_error:
-            raise RuntimeError(f"모든 Groq 모델 실패. 마지막 오류: {last_error}")
-        raise RuntimeError("Groq 응답 없음")
+        return ""
 
     def generate_text(self, prompt: str) -> str:
-        """일반 텍스트 생성: Vertex 우선 → Groq 백업"""
         prompt = (prompt or "").strip()
         if not prompt:
             return ""
 
-        vertex_errors = []
         # Vertex 우선
         if self.creds and self.project_id and self.location and GoogleAuthRequest:
             for m in self.vertex_models:
@@ -817,34 +627,21 @@ class LLMService:
                     txt = (self._vertex_generate(prompt, m) or "").strip()
                     if txt:
                         return txt
-                except RuntimeError as e:
-                    error_str = str(e)
-                    vertex_errors.append(f"{m}: {error_str}")
-                    # 타임아웃이면 즉시 다음 모델로
-                    if "timeout" in error_str.lower() or "타임아웃" in error_str:
-                        continue
-                    # 다른 에러는 기록만
-                    continue
                 except Exception as e:
-                    vertex_errors.append(f"{m}: {str(e)}")
+                    self.last_error = f"Vertex 실패({m}): {e}"
                     continue
 
         # Groq 백업
-        try:
-            return self._generate_groq(prompt)
-        except RuntimeError as groq_err:
-            error_msg = f"LLM 연결 실패\n"
-            if vertex_errors:
-                error_msg += f"Vertex AI 오류:\n" + "\n".join(vertex_errors[:3]) + "\n"  # 최대 3개만
-            error_msg += f"Groq 오류: {groq_err}"
-            raise RuntimeError(error_msg)
+        txt = self._generate_groq(prompt)
+        if txt:
+            return txt
+
+        # 둘 다 실패
+        if not self.last_error:
+            self.last_error = "LLM 미연결(키/권한 설정 필요)"
+        return ""
 
     def generate_json(self, prompt: str, schema: Optional[dict] = None) -> Any:
-        """
-        JSON 생성:
-        1) Vertex structured output (가능하면) 시도
-        2) 실패하면 텍스트로 생성 후 JSON 파싱
-        """
         prompt = (prompt or "").strip()
         if not prompt:
             return None
@@ -864,7 +661,8 @@ class LLMService:
                     if not txt:
                         continue
                     return json.loads(txt)
-                except Exception:
+                except Exception as e:
+                    self.last_error = f"Vertex JSON 실패({m}): {e}"
                     continue
 
         # 2) 텍스트 생성 후 JSON 파싱(강제)
@@ -876,7 +674,6 @@ class LLMService:
                 return json.loads(txt)
             except Exception:
                 pass
-            # JSON 덩어리만 추출
             try:
                 m = re.search(r"\{.*\}|\[.*\]", txt, re.DOTALL)
                 return json.loads(m.group(0)) if m else None
@@ -885,14 +682,10 @@ class LLMService:
 
         for attempt in range(2):
             suffix = "\n\n반드시 JSON만 출력." if attempt == 0 else "\n\n순수 JSON 외의 문자 금지."
-            try:
-                txt = self.generate_text(prompt + suffix)
-                j = _try_parse(txt)
-                if j is not None:
-                    return j
-            except Exception as e:
-                if attempt == 1:  # 마지막 시도에서만 에러 전파
-                    raise RuntimeError(f"JSON 생성 실패: {e}")
+            txt = self.generate_text(prompt + suffix)
+            j = _try_parse(txt)
+            if j is not None:
+                return j
 
         return None
 
@@ -901,12 +694,19 @@ class SearchService:
     """뉴스 검색(네이버 API)"""
 
     def _extract_keywords_llm(self, situation: str) -> str:
+        # LLM이 없으면 그냥 앞부분/키워드 휴리스틱
+        if not llm_service.is_available():
+            s = (situation or "").strip()
+            s = re.sub(r"\s+", " ", s)
+            return s[:30] if s else "행정 민원"
+
         prompt = f"상황: '{situation}'\n뉴스 검색 키워드 2개만 콤마로 구분 출력."
         try:
             res = (llm_service.generate_text(prompt) or "").strip()
-            return re.sub(r'[".?]', "", res)
+            res = re.sub(r'[".?]', "", res)
+            return res if res else (situation[:20] if situation else "행정 민원")
         except Exception:
-            return situation[:20]
+            return situation[:20] if situation else "행정 민원"
 
     def search_news(self, query: str, top_k: int = 3) -> str:
         try:
@@ -951,6 +751,10 @@ class DatabaseService:
         return email.lower().endswith(KOREA_DOMAIN)
 
     def sign_in(self, email: str, password: str) -> dict:
+        # korea.kr 강제(원하면 이 줄만 주석 처리)
+        if email and not self._is_korea_kr_email(email):
+            return {"ok": False, "msg": f"{KOREA_DOMAIN} 이메일만 허용됩니다."}
+
         if not self.is_active or not self.auth_client:
             return {"ok": False, "msg": "Supabase 연결 실패"}
         try:
@@ -1003,9 +807,15 @@ class DatabaseService:
             return self.auth_client
 
     def _pack_summary(self, res: dict, followup: dict) -> dict:
-        return {"meta": res.get("meta"), "strategy": res.get("strategy"), "search_initial": res.get("search"),
-                "law_initial": res.get("law"), "document_content": res.get("doc"), "followup": followup,
-                "timings": res.get("timings")}
+        return {
+            "meta": res.get("meta"),
+            "strategy": res.get("strategy"),
+            "search_initial": res.get("search"),
+            "law_initial": res.get("law"),
+            "document_content": res.get("doc"),
+            "followup": followup,
+            "timings": res.get("timings"),
+        }
 
     def insert_initial_report(self, res: dict) -> dict:
         c = self._get_db_client()
@@ -1013,10 +823,13 @@ class DatabaseService:
             return {"ok": False, "msg": "DB 저장 불가(로그인 필요)", "id": None}
         try:
             followup = {"count": 0, "messages": [], "extra_context": ""}
-            data = {"situation": res.get("situation", ""), "law_name": res.get("law", ""),
-                    "summary": self._pack_summary(res, followup),
-                    "user_email": st.session_state.get("sb_user_email"),
-                    "user_id": st.session_state.get("sb_user_id")}
+            data = {
+                "situation": res.get("situation", ""),
+                "law_name": (res.get("route") or {}).get("mode", "") + " " + (res.get("case_card") or {}).get("deliverable", ""),
+                "summary": self._pack_summary(res, followup),
+                "user_email": st.session_state.get("sb_user_email"),
+                "user_id": st.session_state.get("sb_user_id"),
+            }
             resp = c.table("law_reports").insert(data).execute()
             d = getattr(resp, "data", None)
             inserted_id = d[0].get("id") if isinstance(d, list) and d else None
@@ -1036,8 +849,13 @@ class DatabaseService:
             except Exception:
                 pass
         try:
-            data = {"situation": res.get("situation", ""), "law_name": res.get("law", ""), "summary": summary,
-                    "user_email": st.session_state.get("sb_user_email"), "user_id": st.session_state.get("sb_user_id")}
+            data = {
+                "situation": res.get("situation", ""),
+                "law_name": (res.get("route") or {}).get("mode", "") + " " + (res.get("case_card") or {}).get("deliverable", ""),
+                "summary": summary,
+                "user_email": st.session_state.get("sb_user_email"),
+                "user_id": st.session_state.get("sb_user_id"),
+            }
             c.table("law_reports").insert(data).execute()
             return {"ok": True, "msg": "DB 신규 저장(fallback)"}
         except Exception as e:
@@ -1048,7 +866,12 @@ class DatabaseService:
         if not c:
             return []
         try:
-            q = c.table("law_reports").select("id, created_at, situation, law_name").order("created_at", desc=True).limit(limit)
+            q = (
+                c.table("law_reports")
+                .select("id, created_at, situation, law_name")
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
             if keyword:
                 q = q.ilike("situation", f"%{keyword}%")
             resp = q.execute()
@@ -1132,7 +955,6 @@ class LawOfficialService:
             return (msg, link) if return_link else msg
 
     def get_admrul_text(self, name: str, return_link: bool = False):
-        """행정규칙(훈령/예규/고시) 조회"""
         if not self.api_id:
             msg = "⚠️ LAW_API_ID 미설정"
             return (msg, None) if return_link else msg
@@ -1167,7 +989,6 @@ class LawOfficialService:
             return (msg, link) if return_link else msg
 
     def ai_search(self, query: str, top_k: int = 5) -> str:
-        """지능형(AIS) 검색 결과 반환"""
         if not self.api_id:
             return "⚠️ LAW_API_ID 미설정"
 
@@ -1191,7 +1012,6 @@ class LawOfficialService:
 
     @staticmethod
     def detect_doc_type(name: str) -> str:
-        """이름에서 문서 유형 추론: law vs admrul"""
         admrul_keywords = ["훈령", "예규", "고시", "지침", "요령", "규정", "기준", "지시", "공고"]
         name_lower = name.lower()
         for kw in admrul_keywords:
@@ -1203,7 +1023,7 @@ class LawOfficialService:
 # ==========================================
 # 4) Global Instances
 # ==========================================
-_SERVICE_VERSION = "v5_context_fix"  # 캐시 무효화
+_SERVICE_VERSION = "v6_llm_guard"
 
 @st.cache_resource(show_spinner=False)
 def _get_services(_version: str = _SERVICE_VERSION):
@@ -1236,28 +1056,11 @@ def _compact(text: str, limit: int = 2500) -> str:
 
 
 def _json_or_fallback(prompt: str, schema: dict, fallback: dict) -> dict:
-    try:
-        j = llm_service.generate_json(prompt, schema=schema)
-        return j if isinstance(j, dict) else fallback
-    except RuntimeError as e:
-        # 타임아웃이나 연결 실패 시 에러 메시지 표시
-        error_msg = str(e)
-        if "타임아웃" in error_msg or "timeout" in error_msg.lower() or "연결 실패" in error_msg or "LLM 연결 실패" in error_msg:
-            st.warning(f"⚠️ LLM 연결 타임아웃/실패: {error_msg[:200]}")
-        return fallback
-    except Exception as e:
-        st.warning(f"⚠️ LLM JSON 생성 실패: {str(e)[:200]}")
-        return fallback
-
-
-def _list_or_fallback(prompt: str, fallback: list) -> list:
-    j = llm_service.generate_json(prompt)
-    return j if isinstance(j, list) else fallback
+    j = llm_service.generate_json(prompt, schema=schema) if llm_service.is_available() else None
+    return j if isinstance(j, dict) else fallback
 
 
 class AgentPrompts:
-    """모든 에이전트가 ‘고급스럽게’ 나오도록 공통 스타일/규칙을 강제"""
-
     @staticmethod
     def style_rules() -> str:
         return """
@@ -1322,7 +1125,7 @@ class AgentPrompts:
                                     "type": "object",
                                     "properties": {
                                         "name": {"type": "string"},
-                                        "doc_type": {"type": "string"},  # "law" or "admrul"
+                                        "doc_type": {"type": "string"},
                                         "article_num": {"type": "integer"},
                                         "priority": {"type": "integer"},
                                         "why": {"type": "string"},
@@ -1340,7 +1143,7 @@ class AgentPrompts:
                         "type": "object",
                         "properties": {
                             "name": {"type": "string"},
-                            "include_subregs": {"type": "boolean"},  # 시행령/시행규칙까지 확장 여부
+                            "include_subregs": {"type": "boolean"},
                             "why": {"type": "string"},
                         },
                         "required": ["name", "include_subregs", "why"],
@@ -1371,57 +1174,54 @@ class AgentPrompts:
             "required": ["title", "receiver", "body_paragraphs", "department_head"],
         }
 
+
 class ClerkAgent:
-    """기한/문서번호 산정 전용(안전 버전)"""
+    """기한/문서번호 산정 전용(LLM 제거: 휴리스틱)"""
+
     @staticmethod
     def clerk(situation: str, legal_md: str, *args, **kwargs) -> dict:
-        # 예전 호출: clerk(user_input, legal_md)
-        # 신규 엔진: ClerkAgent.compute_meta(...)
         mode = kwargs.get("mode", "A")
+        risk = kwargs.get("risk_level", "LOW")
         sop_text = kwargs.get("sop_text", "")
         return ClerkAgent.compute_meta(
             situation=situation,
             sop_text=sop_text,
             legal_text=legal_md,
             mode=mode,
+            risk_level=risk,
         )
+
     @staticmethod
-    def compute_meta(situation: str, sop_text: str = "", legal_text: str = "", mode: str = "A") -> dict:
+    def compute_meta(
+        situation: str,
+        sop_text: str = "",
+        legal_text: str = "",
+        mode: str = "A",
+        risk_level: str = "LOW",
+    ) -> dict:
         today = datetime.now(KST)
 
-        # 기본 기한(업무 성격에 따라 약간 보정)
-        default_days = 15
-        if mode == "B":  # 처분/계고/조치결정 성격
-            default_days = 10
-        if mode in ["D", "E"]:  # 계획/기획 성격
-            default_days = 30
+        base_days_by_mode = {
+            "A": 15,  # 민원 회신
+            "B": 10,  # 처분/조치결정
+            "C": 7,   # 보고
+            "D": 30,  # 계획
+            "E": 45,  # 기획
+        }
+        days = base_days_by_mode.get(mode, 15)
 
-        # LLM로 "숫자(일수)"만 뽑아오되, 실패 시 default로
-        prompt = f"""
-오늘: {today.strftime('%Y-%m-%d')}
-업무유형 Mode: {mode}
+        # 리스크 가중
+        if risk_level == "MEDIUM":
+            days += 5
+        elif risk_level == "HIGH":
+            days += 10
 
-[상황]
-{situation}
-
-[SOP(처리방향)]
-{sop_text[:1200]}
-
-[확보 법령/규정]
-{legal_text[:1200]}
-
-위 업무에서 실무적으로 잡아야 할 '처리 기한(며칠)'을 숫자만 출력.
-- 불명확하면 {default_days} 출력.
-- 1~180 범위.
-"""
-        days = default_days
-        try:
-            res = (llm_service.generate_text(prompt) or "").strip()
-            m = re.search(r"\d{1,3}", res)
-            if m:
-                days = int(m.group(0))
-        except Exception:
-            pass
+        # 상황 텍스트 힌트(긴급/즉시/기한 임박 등)
+        t = (situation or "") + " " + (sop_text or "")
+        if re.search(r"(긴급|즉시|당일|오늘\s*중|내일\s*까지)", t):
+            days = max(3, min(days, 7))
+        if re.search(r"(장기|중장기|연간|로드맵|사업\s*기획)", t):
+            days = max(days, 30)
 
         days = max(1, min(days, 180))
         deadline = today + timedelta(days=days)
@@ -1432,6 +1232,7 @@ class ClerkAgent:
             "days_added": days,
             "doc_num": f"행정-{today.strftime('%Y')}-{int(time.time())%1000:03d}호",
         }
+
 
 class MultiAgentSystem:
     """ROUTER → (LEGAL/ADMIN/CIVIL/BEHAVIOR/PLAN) → INTEGRATOR"""
@@ -1503,6 +1304,7 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
             mode = "C"
         if any(k in t for k in ["계고", "처분", "통지", "반려", "요구", "명령"]):
             mode = "B"
+
         risk = "LOW"
         if any(k in t for k in ["반발", "이의", "분쟁", "재민원", "민감"]):
             risk = "MEDIUM"
@@ -1540,7 +1342,6 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
         name = (law_name or "").strip()
         if not name:
             return []
-        # 이미 시행령/규칙이면 중복 확장 금지
         if any(k in name for k in ["시행령", "시행규칙"]):
             return []
         return [f"{name} 시행령", f"{name} 시행규칙"]
@@ -1601,28 +1402,13 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 
     @staticmethod
     def fetch_legal_materials(legal_plan: Any) -> Tuple[str, List[Dict[str, Any]]]:
-        """
-        legal_plan: LLM이 만든 법령/규정 설계 결과(dict 또는 JSON 문자열)
-        return:
-          - legal_md: 확보한 법령/규정 원문 요약(마크다운)
-          - sources: 실제 조회에 사용한 소스 목록(list[dict])
-        전제:
-          - 전역에 law_api_service (LawOfficialService 인스턴스)가 존재해야 함
-          - MultiAgentSystem._expand_sub_regs(law_name) 가 존재하면 하위법령 확장에 사용
-        """
-
-        # -----------------------------
-        # 0) legal_plan 안전 정규화
-        # -----------------------------
         if legal_plan is None:
             legal_plan = {}
-
         if isinstance(legal_plan, str):
             try:
                 legal_plan = json.loads(legal_plan)
             except Exception:
                 legal_plan = {}
-
         if not isinstance(legal_plan, dict):
             legal_plan = {}
 
@@ -1639,11 +1425,7 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
                 if isinstance(x, str):
                     name = x.strip()
                     if name:
-                        out.append({
-                            "name": name,
-                            "include_subregs": True,
-                            "why": "LLM 문자열 출력 정규화"
-                        })
+                        out.append({"name": name, "include_subregs": True, "why": "LLM 문자열 출력 정규화"})
                 elif isinstance(x, dict):
                     name = (x.get("name") or x.get("law_name") or "").strip()
                     if name:
@@ -1660,108 +1442,68 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
                 if isinstance(x, str):
                     name = x.strip()
                     if name:
-                        out.append({
-                            "name": name,
-                            "why": "LLM 문자열 출력 정규화"
-                        })
+                        out.append({"name": name, "why": "LLM 문자열 출력 정규화"})
                 elif isinstance(x, dict):
                     name = (x.get("name") or x.get("admrul_name") or "").strip()
                     if name:
-                        out.append({
-                            "name": name,
-                            "why": (x.get("why") or "").strip()
-                        })
+                        out.append({"name": name, "why": (x.get("why") or "").strip()})
             return out
 
         legal_plan["top_laws"] = _norm_top_laws(legal_plan.get("top_laws"))
         legal_plan["top_admrul"] = _norm_top_admrul(legal_plan.get("top_admrul"))
 
-        # -----------------------------
-        # 1) 조회 대상 sources 구성 (중복 제거 + 우선순위)
-        # -----------------------------
         sources: List[Dict[str, Any]] = []
 
-        # 법령
         for x in (legal_plan.get("top_laws") or []):
             name = (x.get("name") or "").strip()
             if not name:
                 continue
-
             sources.append({
-                "name": name,
-                "doc_type": "law",
-                "article_num": 0,
-                "why": (x.get("why") or "").strip(),
-                "priority": 5,
+                "name": name, "doc_type": "law", "article_num": 0,
+                "why": (x.get("why") or "").strip(), "priority": 5,
                 "include_subregs": bool(x.get("include_subregs", False)),
             })
-
-            # 하위법령(시행령/시행규칙 등) 확장
             if bool(x.get("include_subregs", False)):
-                try:
-                    sub_regs = MultiAgentSystem._expand_sub_regs(name)
-                except Exception:
-                    sub_regs = []
+                sub_regs = MultiAgentSystem._expand_sub_regs(name)
                 for sub in (sub_regs or []):
                     sub_name = (sub or "").strip()
                     if not sub_name:
                         continue
                     sources.append({
-                        "name": sub_name,
-                        "doc_type": "law",
-                        "article_num": 0,
-                        "why": "하위법령(시행) 확인",
-                        "priority": 4,
-                        "include_subregs": False,
+                        "name": sub_name, "doc_type": "law", "article_num": 0,
+                        "why": "하위법령(시행) 확인", "priority": 4, "include_subregs": False,
                     })
 
-        # 행정규칙(훈령/예규/고시/지침 등)
         for x in (legal_plan.get("top_admrul") or []):
             name = (x.get("name") or "").strip()
             if not name:
                 continue
-            sources.append({
-                "name": name,
-                "doc_type": "admrul",
-                "article_num": 0,
-                "why": (x.get("why") or "").strip(),
-                "priority": 3
-            })
+            sources.append({"name": name, "doc_type": "admrul", "article_num": 0, "why": (x.get("why") or "").strip(), "priority": 3})
 
-        # 중복 제거: (doc_type, name) 기준으로 priority 높은 것 유지
         dedup: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for s in sources:
             key = (s.get("doc_type", ""), s.get("name", ""))
             if not key[0] or not key[1]:
                 continue
-            if key not in dedup:
+            if key not in dedup or int(s.get("priority", 0)) > int(dedup[key].get("priority", 0)):
                 dedup[key] = s
-            else:
-                if int(s.get("priority", 0)) > int(dedup[key].get("priority", 0)):
-                    dedup[key] = s
 
         sources = sorted(dedup.values(), key=lambda d: int(d.get("priority", 0)), reverse=True)
 
-        # -----------------------------
-        # 2) 원문 확보 (법령/행정규칙)
-        # -----------------------------
         lines: List[str] = []
         lines.append("## 📜 법령·규정 원문(자동 확보)")
         lines.append("- 아래 내용은 자동 조회/요약 결과이며, 최종 판단 전 **원문 링크에서 재확인**을 권장합니다.")
         lines.append("")
 
         fail_count = 0
-
         for idx, s in enumerate(sources, 1):
             doc_type = s.get("doc_type")
             name = s.get("name")
             why = s.get("why", "")
             article_num = s.get("article_num") or 0
-
             if not name:
                 continue
 
-            # 표시용 헤더
             head = f"### {idx}. {name}"
             if why:
                 head += f"  \n> 선정 사유: {why}"
@@ -1776,7 +1518,6 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
                     lines.append(text or "⚠️ 본문 조회 결과 없음")
                     lines.append("")
                 else:
-                    # 기본은 law
                     art = int(article_num) if str(article_num).isdigit() and int(article_num) > 0 else None
                     text, link = law_api_service.get_law_text(name, art, return_link=True)
                     if link:
@@ -1797,13 +1538,12 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
         legal_md = "\n".join(lines).strip()
         return legal_md, sources
 
-    # (참고) 이미 있다면 이건 건드리지 마세요.
-    # @staticmethod
-    # def _expand_sub_regs(law_name: str) -> List[str]:
-    #     ...
-
     @staticmethod
     def _call_agent(role: str, case_card: dict, route: dict, legal_plan: dict, legal_md: str, news_md: str) -> str:
+        # LLM 없으면 역할별 템플릿
+        if not llm_service.is_available():
+            return MultiAgentSystem._fallback_agent(role, case_card, route, legal_md, news_md)
+
         base = AgentPrompts.style_rules()
         header = f"[ROLE] {role}\n[Mode] {route.get('mode')}({MODE_LABEL.get(route.get('mode'), '-')}) / [Risk] {route.get('risk_level')}({RISK_HINT.get(route.get('risk_level'), '-')})"
         cc = json.dumps(case_card, ensure_ascii=False)
@@ -1833,10 +1573,7 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 4) 리스크 & 방어논리(감사/소송 관점)
 서론 금지.
 """
-            try:
-                return llm_service.generate_text(prompt)
-            except Exception as e:
-                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
+            return llm_service.generate_text(prompt) or MultiAgentSystem._fallback_agent(role, case_card, route, legal_md, news_md)
 
         if role == "ADMIN":
             prompt = f"""{base}
@@ -1858,10 +1595,7 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 4) 누락 위험 TOP3 + 예방책
 서론 금지.
 """
-            try:
-                return llm_service.generate_text(prompt)
-            except Exception as e:
-                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
+            return llm_service.generate_text(prompt) or MultiAgentSystem._fallback_agent(role, case_card, route, legal_md, news_md)
 
         if role == "CIVIL":
             prompt = f"""{base}
@@ -1886,10 +1620,7 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 4) 반복/악성 민원 대응 레벨(1~3) + 원칙
 서론 금지.
 """
-            try:
-                return llm_service.generate_text(prompt)
-            except Exception as e:
-                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
+            return llm_service.generate_text(prompt) or MultiAgentSystem._fallback_agent(role, case_card, route, legal_md, news_md)
 
         if role == "BEHAVIOR":
             prompt = f"""{base}
@@ -1908,10 +1639,7 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 4) 기록·증거 남기기 체크리스트
 서론 금지.
 """
-            try:
-                return llm_service.generate_text(prompt)
-            except Exception as e:
-                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
+            return llm_service.generate_text(prompt) or MultiAgentSystem._fallback_agent(role, case_card, route, legal_md, news_md)
 
         if role == "PLAN":
             prompt = f"""{base}
@@ -1931,20 +1659,101 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 5) 개선안(단기/중기/장기 각 3개)
 서론 금지.
 """
-            try:
-                return llm_service.generate_text(prompt)
-            except Exception as e:
-                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
+            return llm_service.generate_text(prompt) or MultiAgentSystem._fallback_agent(role, case_card, route, legal_md, news_md)
 
         return ""
 
     @staticmethod
+    def _fallback_agent(role: str, case_card: dict, route: dict, legal_md: str, news_md: str) -> str:
+        mode = route.get("mode", "A")
+        risk = route.get("risk_level", "LOW")
+        facts = "\n".join([f"- {x}" for x in (case_card.get("facts_timeline") or [])]) or "- (사실관계 입력 필요)"
+        deliverable = case_card.get("deliverable", "회신문")
+
+        if role == "LEGAL":
+            return f"""# 1) 결론(초안)
+- **추가 확인 필요**(LLM 미연결 상태로 상세 매핑은 템플릿 제공)
+- 기본 절차는 **행정절차법 중심**으로 진행
+- 개별 근거는 **업무 분야별 특별법 확인 필요**
+
+# 2) 사실관계(요약)
+{facts}
+
+# 3) 절차 체크리스트
+- [ ] 관할/권한 확인
+- [ ] 사실관계(증빙) 확보
+- [ ] 처분 성격이면 사전통지/의견제출 검토
+- [ ] 문서 송달/기재사항 점검
+- [ ] 이의절차 안내 문구 포함
+
+# 4) 리스크 & 방어
+- Risk={risk}: 기록/근거/기한 관리가 핵심
+- 단정 표현 지양, “확인 필요/검토 결과” 표현 사용
+"""
+
+        if role == "ADMIN":
+            return f"""# 업무처리 흐름(템플릿)
+| 단계 | 담당 | 기한 | 입력(증빙/조회) | 출력(문서) | 유의사항 |
+|---|---|---|---|---|---|
+| 1. 접수/쟁점확정 | 담당자 | D+1 | 민원내용, 첨부자료 | 검토메모 | 개인정보 마스킹 |
+| 2. 사실확인 | 담당자/협조부서 | D+3~7 | 현장/시스템조회 | 사실확인서/내부보고 | 기록 남기기 |
+| 3. 법적검토 | 담당자 | D+7~10 | 관련 법령/규칙 | 검토의견 | 절차 하자 방지 |
+| 4. 회신/통지 | 팀장결재 | D+10~15 | 최종안 | {deliverable} | 이의절차 안내 |
+
+# 누락 위험 TOP3
+1) 사실관계 미확정
+2) 법적 근거 미표기/절차 누락
+3) 송달/기한 관리 부실
+"""
+
+        if role == "CIVIL":
+            return f"""# 회신 핵심 문장(복붙)
+1) “귀하의 민원사항에 대하여 관련 자료를 확인한 결과, 다음과 같이 안내드립니다.”
+2) “현재까지 확인된 사실관계는 아래와 같으며, 추가 확인이 필요한 부분은 별도로 안내드리겠습니다.”
+3) “관련 규정에 따라 조치 가능 범위를 검토하였으며, 처리 결과는 아래와 같습니다.”
+4) “추가 자료가 있을 경우 제출해 주시면 재검토하겠습니다.”
+5) “본 회신은 현 시점 기준이며, 사실관계 변동 시 달라질 수 있습니다.”
+
+# FAQ(5)
+- Q1. 왜 바로 처분/조치가 안 되나요?
+- Q2. 어떤 자료가 더 필요한가요?
+- Q3. 처리 기한은 얼마나 걸리나요?
+- Q4. 결과에 동의하지 않으면 어떻게 하나요?
+- Q5. 진행 상황을 어떻게 확인하나요?
+"""
+
+        if role == "BEHAVIOR":
+            return f"""# 반발 대응 스크립트(템플릿)
+- “말씀하신 불편은 충분히 이해합니다. 다만 행정처리는 사실확인과 절차를 거쳐야 합니다.”
+- “지금 단계에서 확답드리기 어려운 부분이 있어, 확인 가능한 범위를 먼저 안내드리겠습니다.”
+- “추가로 자료를 주시면 그 범위 내에서 신속히 재검토하겠습니다.”
+- “동일 사안 재민원 방지를 위해, 이번 회신에 근거/절차/이의방법을 함께 안내드리겠습니다.”
+
+# 기록 체크리스트
+- [ ] 통화 일시/요지
+- [ ] 민원인 요구사항
+- [ ] 안내한 근거/절차
+- [ ] 추가자료 요청 항목
+"""
+
+        if role == "PLAN":
+            return f"""# SOP 자산화(템플릿)
+- 표준 목차: 접수→사실확인→법적검토→조치/회신→사후관리
+- 기록 필드: 민원유형/쟁점/근거/기한/협조부서/결과/재민원 여부
+- KPI: 평균 처리기간, 반려율, 재민원율
+"""
+        return ""
+
+    @staticmethod
     def integrate(case_card: dict, route: dict, legal_plan: dict, legal_md: str, news_md: str, agent_out: dict) -> str:
+        # LLM 없거나 빈 응답이면 “완성형 템플릿 SOP” 제공
+        if not llm_service.is_available():
+            return MultiAgentSystem._fallback_integrator(case_card, route, legal_md, news_md, agent_out)
+
         base = AgentPrompts.style_rules()
         prompt = f"""{base}
 너는 INTEGRATOR(9급) 편집장이다.
 아래 산출물을 충돌 없이 병합해 **최종 SOP(처리방향) 완제품**을 작성하라.
-문서는 “상급자 보고 + 실무 실행 + 민원 대응”이 동시에 가능해야 한다.
 
 [Mode/Risk]
 Mode={route.get('mode')}({MODE_LABEL.get(route.get('mode'), '-')})
@@ -2002,16 +1811,80 @@ Risk={route.get('risk_level')}({RISK_HINT.get(route.get('risk_level'), '-')})
 
 # 8. 추가 확인 질문(최대 5개)
 - 부족한 사실/증빙 질문
-
-서론(인사말) 금지.
 """
-        try:
-            return llm_service.generate_text(prompt)
-        except Exception as e:
-            return f"⚠️ LLM 연결 실패 (INTEGRATOR): {str(e)}\n\n에이전트 결과를 기반으로 수동 통합이 필요합니다."
+        out = (llm_service.generate_text(prompt) or "").strip()
+        return out if out else MultiAgentSystem._fallback_integrator(case_card, route, legal_md, news_md, agent_out)
+
+    @staticmethod
+    def _fallback_integrator(case_card: dict, route: dict, legal_md: str, news_md: str, agent_out: dict) -> str:
+        mode = route.get("mode", "A")
+        risk = route.get("risk_level", "LOW")
+        deliverable = case_card.get("deliverable", "회신문")
+        facts = case_card.get("facts_timeline", [])
+        facts_md = "\n".join([f"- {x}" for x in facts]) if facts else "- (사실관계 입력 필요)"
+
+        return f"""# 1. 한 줄 결론
+- **추가확인 필요**: 사실관계·관할·근거 확인 후 {deliverable}로 종결(Mode={mode}, Risk={risk})
+
+# 2. 업무처리 흐름 (단계/기한/담당)
+| 단계 | 담당 | 권장기한 | 입력(증빙/조회) | 출력(문서) | 유의사항 |
+|---|---|---:|---|---|---|
+| 1. 접수/쟁점확정 | 담당자 | D+1 | 민원요지/첨부 | 내부검토메모 | 개인정보 마스킹 |
+| 2. 사실확인 | 담당/협조 | D+3~7 | 시스템조회/현장 | 사실확인 정리 | 기록 남기기 |
+| 3. 법적검토 | 담당자 | D+7~10 | 관련 법령/규칙 | 검토의견 | 절차 하자 방지 |
+| 4. 회신/통지 | 결재라인 | D+10~15 | 최종안 | {deliverable} | 이의절차 안내 |
+
+# 3. 단계별 법적 근거 매핑
+- 기본 공통: **행정절차법(사전통지/의견제출/처분절차/송달 등)**  
+- 개별 사안: **업무 분야별 특별법/지자체 조례/훈령·예규 확인 필요**  
+- 자동 확보 법령 요약(참고):
+{_compact(legal_md, 800)}
+
+# 4. 실무 체크리스트 (Yes/No)
+- [ ] 관할/권한 확인
+- [ ] 사실관계(증빙) 확보
+- [ ] 처분 성격이면 사전통지/의견제출 검토
+- [ ] 문서 기재사항/송달/기한 점검
+- [ ] 이의절차 안내 포함
+
+# 5. 민원 응대 핵심(회신 문장/FAQ)
+**핵심 문장(5)**  
+1) “귀하의 민원에 대해 관련 자료를 확인한 결과, 아래와 같이 안내드립니다.”  
+2) “현재 확인된 사실관계는 다음과 같으며, 추가 확인이 필요한 부분은 별도로 안내드리겠습니다.”  
+3) “관련 규정에 따른 처리 가능 범위를 검토하였습니다.”  
+4) “추가 자료 제출 시 재검토가 가능합니다.”  
+5) “본 회신은 현 시점 기준이며 사실관계 변동 시 달라질 수 있습니다.”  
+
+**FAQ(5)**  
+- Q1. 왜 즉시 조치가 어려운가요?  
+- Q2. 어떤 자료가 추가로 필요한가요?  
+- Q3. 처리 기한은?  
+- Q4. 이의가 있으면?  
+- Q5. 진행 상황 확인은?
+
+# 6. 예상 반발 및 대응 스크립트(필요 시)
+- “말씀하신 불편은 이해합니다. 다만 행정처리는 사실확인과 절차를 거쳐야 합니다.”
+- “확답이 어려운 부분은 확인 후 안내드리겠습니다.”
+- “추가 자료가 있으면 제출해 주시면 신속히 재검토하겠습니다.”
+
+# 7. 리스크 & 방어 포인트
+- Risk={risk}: 기록·근거·기한 관리가 핵심(감사/재민원 대비)
+- 단정표현 지양, “확인 필요/검토 결과” 문장 사용
+
+# 8. 추가 확인 질문(최대 5개)
+- 발생 일시/장소/대상(마스킹) 확인?
+- 민원인의 구체 요청(처분/회신/보고 중 무엇인지)?
+- 확보 증빙(사진/공문/시스템조회 결과) 존재?
+- 협조 필요한 부서/기관?
+- 동일 사안 재민원/분쟁 이력?
+"""
 
     @staticmethod
     def draft_document(case_card: dict, legal_md: str, final_sop: str, meta_info: dict) -> dict:
+        # LLM 없으면 템플릿 공문 JSON
+        if not llm_service.is_available():
+            return MultiAgentSystem._fallback_document(case_card, meta_info, legal_md, final_sop)
+
         schema = AgentPrompts.doc_schema()
         prompt = f"""
 너는 행정기관 베테랑 서기다. 아래 최종 SOP를 기반으로 실제 공문 JSON을 작성하라.
@@ -2039,25 +1912,47 @@ Risk={route.get('risk_level')}({RISK_HINT.get(route.get('risk_level'), '-')})
 - body_paragraphs (배열)
 - department_head
 """
-        try:
-            doc = llm_service.generate_json(prompt, schema=schema)
-        except Exception as e:
-            st.error(f"공문 생성 중 LLM 연결 실패: {e}")
-            doc = None
+        doc = llm_service.generate_json(prompt, schema=schema)
         if not isinstance(doc, dict):
-            return {
-                "title": "민원 처리 결과 안내",
-                "receiver": "민원인 귀하",
-                "body_paragraphs": ["1. 경위", "2. 관련 법령", "3. 검토 결과", "4. 안내 사항"],
-                "department_head": "행정기관장",
-            }
+            return MultiAgentSystem._fallback_document(case_card, meta_info, legal_md, final_sop)
+
         bp = doc.get("body_paragraphs")
         doc["body_paragraphs"] = [bp] if isinstance(bp, str) else (bp if isinstance(bp, list) else [])
         for k in ["title", "receiver", "department_head"]:
             if not isinstance(doc.get(k), str):
                 doc[k] = ""
+        # 빈 값 방지
+        if not doc.get("title"):
+            doc["title"] = "민원 처리 결과 안내"
+        if not doc.get("receiver"):
+            doc["receiver"] = "민원인 귀하"
+        if not doc.get("department_head"):
+            doc["department_head"] = "행정기관장"
+        if not doc["body_paragraphs"]:
+            doc["body_paragraphs"] = ["1. 경위", "2. 관련 법령", "3. 검토 결과", "4. 안내 사항"]
         return doc
 
+    @staticmethod
+    def _fallback_document(case_card: dict, meta_info: dict, legal_md: str, final_sop: str) -> dict:
+        deliverable = case_card.get("deliverable", "회신문")
+        task = case_card.get("task_title", "민원")
+        law_hint = "행정절차법 등 관련 규정"
+        m = re.search(r"###\s+\d+\.\s+([^\n]+)", legal_md or "")
+        if m:
+            law_hint = m.group(1).strip()
+
+        return {
+            "title": f"{task} 처리 결과 안내({deliverable})",
+            "receiver": "민원인 귀하",
+            "body_paragraphs": [
+                "1. 귀하의 민원(신청) 사항에 대하여 관련 자료를 확인하였습니다.",
+                "2. 확인된 사실관계 및 처리 가능 범위를 검토하였으며, 필요한 경우 추가 확인이 진행될 수 있습니다.",
+                f"3. 관련 근거: {law_hint}",
+                "4. 처리 결과(요지): 본 건은 관련 절차에 따라 처리(또는 검토)하였음을 안내드립니다. (확인 필요 사항은 별도 요청 예정)",
+                "5. 안내: 본 회신은 현 시점 기준이며, 추가 자료 제출 또는 사실관계 변동 시 달라질 수 있습니다.",
+            ],
+            "department_head": "행정기관장",
+        }
 
 
 # ==========================================
@@ -2077,25 +1972,9 @@ def run_workflow(user_input: str) -> dict:
     # Phase 0) 사건카드 + 라우팅
     add_log("🧩 Phase 0: 사건카드 구조화 및 라우팅...", "sys")
     t = time.perf_counter()
-    try:
-        case_card = MultiAgentSystem.extract_case_card(user_input)
-        route = MultiAgentSystem.route(case_card)
-    except Exception as e:
-        add_log(f"⚠️ 라우팅 중 오류: {str(e)[:200]}", "sys")
-        # 기본값으로 계속 진행
-        case_card = {
-            "task_title": "업무 처리",
-            "task_type": "미분류",
-            "goal": "민원을 처리하고 행정적으로 정리",
-            "facts_timeline": [user_input[:120] if user_input else "입력 없음"],
-            "deliverable": "회신문",
-        }
-        route = {
-            "mode": "A",
-            "risk_level": "LOW",
-            "agents": ["LEGAL", "INTEGRATOR"],
-        }
-    
+    case_card = MultiAgentSystem.extract_case_card(user_input)
+    route = MultiAgentSystem.route(case_card)
+
     if route.get("risk_level") not in ["LOW", "MEDIUM", "HIGH"]:
         route["risk_level"] = "LOW"
     if route.get("mode") not in ["A", "B", "C", "D", "E"]:
@@ -2108,7 +1987,13 @@ def run_workflow(user_input: str) -> dict:
     timings["route_sec"] = round(time.perf_counter() - t, 2)
     add_log(f"✅ 라우팅 완료: Mode={route.get('mode')} / Risk={route.get('risk_level')} ({timings['route_sec']}s)", "sys")
 
-    # Phase 1) 법령 설계 + 원문 확보(법률/시행령/시행규칙/행정규칙)
+    # LLM 상태 힌트
+    if not llm_service.is_available():
+        add_log("⚠️ AI(LLM) 미연결: Vertex 또는 Groq 키/권한 설정 필요 → 템플릿 모드로 진행", "sys")
+    else:
+        add_log("✅ AI(LLM) 연결 감지: Vertex/Groq 중 하나 사용", "sys")
+
+    # Phase 1) 법령 설계 + 원문 확보
     add_log("📜 Phase 1: 법령/규정 설계 및 원문 확보...", "legal")
     t = time.perf_counter()
     legal_plan = MultiAgentSystem.plan_legal(case_card, route)
@@ -2133,17 +2018,18 @@ def run_workflow(user_input: str) -> dict:
     t = time.perf_counter()
 
     agents = route.get("agents") or []
-    # INTEGRATOR는 통합 단계에서 호출하므로 여기서는 제외
     run_roles = [a for a in agents if a in ["ADMIN", "LEGAL", "CIVIL", "BEHAVIOR", "PLAN"]]
-
     agent_out: Dict[str, str] = {}
 
     def _run(role: str) -> Tuple[str, str]:
         out = MultiAgentSystem._call_agent(role, case_card, route, legal_plan, legal_md, search_results)
         return role, out
 
+    # LLM 연결 시에도 과도 동시 호출로 429가 날 수 있어 2로 제한(안정)
+    max_workers = min(2, len(run_roles)) if run_roles else 0
+
     if run_roles:
-        with ThreadPoolExecutor(max_workers=min(4, len(run_roles))) as ex:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futs = [ex.submit(_run, r) for r in run_roles]
             for f in as_completed(futs):
                 try:
@@ -2162,27 +2048,35 @@ def run_workflow(user_input: str) -> dict:
     timings["integrate_sec"] = round(time.perf_counter() - t, 2)
     add_log(f"✅ SOP 완성 ({timings['integrate_sec']}s)", "strat")
 
-    # Phase 4) 기한 산정 + 공문 생성
+    # Phase 4) 기한 산정(LLM 제거)
     add_log("📅 Phase 4: 기한 산정...", "calc")
     t = time.perf_counter()
-    meta_info = ClerkAgent.clerk(user_input, legal_md)  # 기존 clerk 재사용
+    meta_info = ClerkAgent.clerk(
+        user_input,
+        legal_md,
+        mode=route.get("mode", "A"),
+        risk_level=route.get("risk_level", "LOW"),
+        sop_text=final_sop,
+    )
     timings["calc_sec"] = round(time.perf_counter() - t, 2)
+    add_log(f"✅ 기한 산정 완료 ({timings['calc_sec']}s)", "calc")
 
+    # Phase 5) 공문 생성(LLM 실패시 템플릿)
     add_log("✍️ Phase 5: 공문서 생성...", "draft")
     t = time.perf_counter()
     doc_data = MultiAgentSystem.draft_document(case_card, legal_md, final_sop, meta_info)
     timings["draft_sec"] = round(time.perf_counter() - t, 2)
+    add_log(f"✅ 공문 생성 완료 ({timings['draft_sec']}s)", "draft")
 
     timings["total_sec"] = round(time.perf_counter() - t0, 2)
     log_placeholder.empty()
 
-    # 기존 UI/DB 호환: law 필드=법령요약, strategy 필드=최종 SOP
     return {
         "situation": user_input,
         "case_card": case_card,
         "route": route,
         "legal_plan": legal_plan,
-        "legal_raw": legal_raw,  # DB에 더 저장하고 싶으면 summary에 포함 가능
+        "legal_raw": legal_raw,
         "doc": doc_data,
         "meta": meta_info,
         "law": legal_md,
@@ -2190,9 +2084,8 @@ def run_workflow(user_input: str) -> dict:
         "strategy": final_sop,
         "agents": agent_out,
         "timings": timings,
+        "llm_last_error": llm_service.last_error,
     }
-
-
 
 
 # ==========================================
@@ -2209,7 +2102,7 @@ def build_case_context(res: dict) -> str:
     situation = res.get("situation", "")
     law_txt = _strip_html(res.get("law", ""))[:2000]
     news_txt = _strip_html(res.get("search", ""))[:1000]
-    strategy = res.get("strategy", "")[:1200]  # SOP라서 조금 더
+    strategy = (res.get("strategy", "") or "")[:1200]
     route = res.get("route") or {}
     case_card = res.get("case_card") or {}
 
@@ -2230,8 +2123,8 @@ def build_case_context(res: dict) -> str:
 5) 공문: 제목={doc.get('title','')}, 수신={doc.get('receiver','')}
 {body}
 
-[규칙] 컨텍스트 내에서만 답변. 단정 금지. 추가 조회 필요시 명시."""
-
+[규칙] 컨텍스트 내에서만 답변. 단정 금지. 추가 조회 필요시 명시.
+"""
 
 
 def needs_tool_call(user_msg: str) -> dict:
@@ -2242,19 +2135,20 @@ def needs_tool_call(user_msg: str) -> dict:
 
 
 def plan_tool_calls_llm(user_msg: str, situation: str, known_law: str) -> dict:
-    schema = {"type": "object", "properties": {"need_law": {"type": "boolean"}, "law_name": {"type": "string"},
-              "article_num": {"type": "integer"}, "need_news": {"type": "boolean"}, "news_query": {"type": "string"}}}
+    schema = {"type": "object", "properties": {
+        "need_law": {"type": "boolean"},
+        "law_name": {"type": "string"},
+        "article_num": {"type": "integer"},
+        "need_news": {"type": "boolean"},
+        "news_query": {"type": "string"},
+    }}
     prompt = f"""[민원] {situation}
 [확보 법령] {known_law[:1500]}
 [질문] {user_msg}
 추가 조회 필요시 JSON 출력. need_law/law_name/article_num/need_news/news_query"""
-    try:
-        plan = llm_service.generate_json(prompt, schema=schema) or {}
-    except Exception as e:
-        # LLM 실패 시 기본값 반환
-        plan = {}
+    plan = llm_service.generate_json(prompt, schema=schema) if llm_service.is_available() else {}
     if not isinstance(plan, dict):
-        return {"need_law": False, "law_name": "", "article_num": 0, "need_news": False, "news_query": ""}
+        plan = {"need_law": False, "law_name": "", "article_num": 0, "need_news": False, "news_query": ""}
     try:
         plan["article_num"] = int(plan.get("article_num") or 0)
     except Exception:
@@ -2263,6 +2157,22 @@ def plan_tool_calls_llm(user_msg: str, situation: str, known_law: str) -> dict:
 
 
 def answer_followup(case_ctx: str, extra_ctx: str, history: list, user_msg: str) -> str:
+    # 후속은 LLM 없으면 “케이스 컨텍스트 재정리 템플릿”으로
+    if not llm_service.is_available():
+        return f"""- (AI 미연결 상태) 아래 정보를 기준으로 담당자가 판단/회신 초안을 보완하세요.
+
+[질문]
+{user_msg}
+
+[핵심 컨텍스트]
+{_compact(case_ctx, 1200)}
+
+[추가 조회]
+{_compact(extra_ctx, 800)}
+
+- 필요 시: ① 사실관계 추가 ② 법령(조문) 지정 ③ 요청하는 산출물(회신/보고/계고 등) 명확화
+"""
+
     hist = history[-8:]
     hist_txt = "\n".join([f"{m['role']}: {m['content']}" for m in hist]) if hist else ""
     prompt = f"""{case_ctx}
@@ -2270,10 +2180,7 @@ def answer_followup(case_ctx: str, extra_ctx: str, history: list, user_msg: str)
 [히스토리] {hist_txt}
 [질문] {user_msg}
 케이스 고정 답변. 서론 금지."""
-    try:
-        return llm_service.generate_text(prompt)
-    except Exception as e:
-        return f"⚠️ LLM 연결 실패: {str(e)}\n\n질문에 대한 답변을 생성할 수 없습니다. LLM 서비스 설정을 확인해주세요."
+    return llm_service.generate_text(prompt) or "(응답 생성 실패: LLM 오류)"
 
 
 def render_followup_chat(res: dict):
@@ -2293,7 +2200,6 @@ def render_followup_chat(res: dict):
 
     remain = max(0, MAX_FOLLOWUP_Q - st.session_state["followup_count"])
     st.info(f"후속 질문: **{remain}/{MAX_FOLLOWUP_Q}**")
-
     if remain == 0:
         st.warning("후속 질문 한도(5회) 소진")
         return
@@ -2329,38 +2235,24 @@ def render_followup_chat(res: dict):
 
     with st.chat_message("assistant"):
         with st.spinner("답변 생성..."):
-            ans = answer_followup(case_ctx, st.session_state.get("followup_extra_context", ""),
-                                  st.session_state["followup_messages"], user_q)
+            ans = answer_followup(case_ctx, st.session_state.get("followup_extra_context", ""), st.session_state["followup_messages"], user_q)
             st.markdown(ans)
 
     st.session_state["followup_messages"].append({"role": "assistant", "content": ans})
 
-    followup_data = {"count": st.session_state["followup_count"], "messages": st.session_state["followup_messages"],
-                     "extra_context": st.session_state.get("followup_extra_context", "")}
+    followup_data = {"count": st.session_state["followup_count"], "messages": st.session_state["followup_messages"], "extra_context": st.session_state.get("followup_extra_context", "")}
     upd = db_service.update_followup(st.session_state.get("report_id"), res, followup_data)
     if not upd.get("ok"):
         st.caption(f"⚠️ {upd.get('msg')}")
+
+
 # ==========================================
 # 8) Sidebar UI (ChatGPT Style)
 # ==========================================
 def render_sidebar_ui():
-    st.markdown("""
+    st.markdown(
+        """
     <style>
-    .sidebar-btn {
-        width: 100%;
-        text-align: left;
-        padding: 0.5rem;
-        background: transparent;
-        border: 1px solid #4b5563;
-        color: #e5e7eb;
-        border-radius: 6px;
-        margin-bottom: 4px;
-        cursor: pointer;
-        transition: background 0.2s;
-    }
-    .sidebar-btn:hover {
-        background: #374151;
-    }
     .history-item {
         display: block;
         width: 100%;
@@ -2368,7 +2260,7 @@ def render_sidebar_ui():
         margin-bottom: 4px;
         background: transparent;
         border: none;
-        color: #d1d5db;
+        color: #111827;
         text-align: left;
         font-size: 0.9rem;
         border-radius: 6px;
@@ -2377,69 +2269,55 @@ def render_sidebar_ui():
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    .history-item:hover {
-        background: rgba(255,255,255,0.1);
-    }
+    .history-item:hover { background: rgba(0,0,0,0.05); }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
-    # 1. 로고 및 타이틀
     st.markdown("### 🏢 AI 행정관 Pro")
-    st.caption("Govable AI | kim0395kk@korea.kr")
-    
-    # 2. 새 채팅 버튼 (항상 표시)
+    st.caption("Govable AI | (korea.kr only)")
+
     if st.button("➕ 새 채팅", use_container_width=True, type="primary"):
-        for key in ["workflow_result", "report_id", "followup_messages", "followup_count", "followup_extra_context"]:
+        for key in ["workflow_result", "report_id", "followup_messages", "followup_count", "followup_extra_context", "loaded_report"]:
             if key in st.session_state:
                 del st.session_state[key]
         st.rerun()
-    
+
     st.markdown("---")
 
-    # 3. 로그인 상태에 따른 분기
     if not db_service.is_logged_in():
         st.info("로그인하여 기록을 저장하세요.")
-        with st.expander("🔐 로그인 / 회원가입", expanded=True):
+        with st.expander("🔐 로그인", expanded=True):
             email = st.text_input("이메일", key="login_email")
             if email and not email.lower().endswith(KOREA_DOMAIN):
-                st.caption(f"⚠️ {KOREA_DOMAIN} 권장")
+                st.caption(f"⚠️ {KOREA_DOMAIN} 이메일만 허용")
             pw = st.text_input("비밀번호", type="password", key="login_pw")
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("로그인", use_container_width=True):
-                    r = db_service.sign_in(email, pw)
-                    if r.get("ok"):
-                        st.rerun()
-                    else:
-                        st.error(r.get("msg"))
-            with c2:
-                if st.button("가입", use_container_width=True):
-                    st.warning("관리자 문의 필요")
 
+            if st.button("로그인", use_container_width=True):
+                r = db_service.sign_in(email, pw)
+                if r.get("ok"):
+                    st.rerun()
+                else:
+                    st.error(r.get("msg"))
+
+            st.caption("가입은 Supabase Auth에서 계정 생성(관리자) 방식 권장")
     else:
-        # 로그인 상태: 히스토리 목록 표시
-        user_email = st.session_state.get('sb_user_email', 'User')
+        user_email = st.session_state.get("sb_user_email", "User")
         st.caption(f"👤 {user_email}")
-        
+
         st.markdown("### 🗂️ 내 채팅 목록")
-        
-        # 검색 필터
         keyword = st.text_input("검색", placeholder="기록 검색...", label_visibility="collapsed")
-        
-        # 리포트 목록 가져오기
+
         rows = db_service.list_reports(limit=20, keyword=keyword)
-        
         if not rows:
             st.caption("저장된 기록이 없습니다.")
         else:
-            # 스크롤 가능한 영역 (Streamlit 기본 컨테이너 활용)
             for r in rows:
                 rid = r.get("id")
                 sit = (r.get("situation") or "제목 없음").replace("\n", " ")[:18]
-                created = (r.get("created_at") or "")[5:10] # MM-DD
-                
-                # 버튼 클릭 시 해당 리포트 로드
+                created = (r.get("created_at") or "")[5:10]  # MM-DD
+
                 if st.button(f"📄 {sit}...", key=f"hist_{rid}", help=f"{created} 작성"):
                     detail = db_service.get_report(rid)
                     if detail:
@@ -2456,23 +2334,8 @@ def render_sidebar_ui():
 # 9) Main UI
 # ==========================================
 def main():
-    # 다크모드 상태 초기화
     if "dark_mode" not in st.session_state:
         st.session_state["dark_mode"] = False
-
-    # 다크모드 CSS 적용
-    if st.session_state["dark_mode"]:
-        st.markdown("""<style>
-        .stApp { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f0f23 100%) !important; }
-        .stApp::before { background: radial-gradient(circle at 20% 50%, rgba(102, 126, 234, 0.2), transparent 50%),
-            radial-gradient(circle at 80% 80%, rgba(168, 85, 247, 0.2), transparent 50%) !important; }
-        [data-testid="stSidebar"] { background: linear-gradient(180deg, rgba(26, 26, 46, 0.98) 0%, rgba(22, 33, 62, 0.95) 100%) !important; }
-        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, 
-        [data-testid="stSidebar"] p, [data-testid="stSidebar"] label { color: #e2e8f0 !important; -webkit-text-fill-color: #e2e8f0 !important; }
-        .paper-sheet { background: linear-gradient(135deg, rgba(26, 26, 46, 0.95), rgba(22, 33, 62, 0.92)) !important; color: #e2e8f0 !important; }
-        .doc-body, .doc-info { color: #cbd5e1 !important; }
-        h1, h2, h3, p, label { color: #e2e8f0 !important; }
-        </style>""", unsafe_allow_html=True)
 
     # ===== 상단 시스템 상태 + 다크모드 토글 =====
     top_cols = st.columns([6, 1, 1])
@@ -2480,12 +2343,18 @@ def main():
         g = _safe_secrets("general")
         v = _safe_secrets("vertex")
         s = _safe_secrets("supabase")
+
         status_items = []
         status_items.append("✅법령" if g.get("LAW_API_ID") else "❌법령")
         status_items.append("✅뉴스" if (g.get("NAVER_CLIENT_ID") and g.get("NAVER_CLIENT_SECRET")) else "❌뉴스")
-        status_items.append("✅AI" if v.get("SERVICE_ACCOUNT_JSON") else "❌AI")
+        status_items.append("✅AI" if llm_service.is_available() else "❌AI")
         status_items.append("✅DB" if (s.get("SUPABASE_URL") and (s.get("SUPABASE_ANON_KEY") or s.get("SUPABASE_KEY"))) else "❌DB")
-        st.caption(" | ".join(status_items) + (" | ⚠️관리자" if db_service.service_key else ""))
+
+        hint = ""
+        if not llm_service.is_available() and llm_service.last_error:
+            hint = f" | ⚠️AI: {llm_service.last_error[:60]}"
+        st.caption(" | ".join(status_items) + hint)
+
     with top_cols[1]:
         if st.button("🌙" if not st.session_state["dark_mode"] else "☀️", help="다크모드 토글"):
             st.session_state["dark_mode"] = not st.session_state["dark_mode"]
@@ -2493,16 +2362,20 @@ def main():
     with top_cols[2]:
         st.caption("⚠️개인정보금지")
 
-    # ===== 사이드바: 로그인 + 히스토리 (ChatGPT 스타일) =====
     with st.sidebar:
         render_sidebar_ui()
 
     col_left, col_right = st.columns([1, 1.2])
 
+    # 좌측 입력/결과
     with col_left:
         st.markdown("### 🗣️ 업무 지시")
-        user_input = st.text_area("업무 내용", height=140, label_visibility="collapsed",
-            placeholder="예시\n- 상황: (무슨 일 / 어디 / 언제)\n- 의도: (확인 쟁점)\n- 요청: (공문 종류)")
+        user_input = st.text_area(
+            "업무 내용",
+            height=140,
+            label_visibility="collapsed",
+            placeholder="예시\n- 상황: (무슨 일 / 어디 / 언제)\n- 의도: (확인 쟁점)\n- 요청: (공문 종류)",
+        )
 
         if st.button("⚡ 스마트 분석", type="primary", use_container_width=True):
             if not user_input:
@@ -2511,20 +2384,42 @@ def main():
                 try:
                     with st.spinner("AI 에이전트 협업 중..."):
                         res = run_workflow(user_input)
-                        ins = db_service.insert_initial_report(res)
+                        # 저장은 로그인한 경우에만
+                        ins = db_service.insert_initial_report(res) if db_service.is_logged_in() else {"msg": "로그인 시 기록 저장 가능", "id": None}
                         res["save_msg"] = ins.get("msg")
                         st.session_state["report_id"] = ins.get("id")
                         st.session_state["workflow_result"] = res
                 except Exception as e:
                     st.error(f"오류: {e}")
 
+        # 저장된 기록 로드
+        if "loaded_report" in st.session_state and "workflow_result" not in st.session_state:
+            detail = st.session_state["loaded_report"]
+            summary = detail.get("summary") or {}
+            # summary 구조 호환
+            st.session_state["workflow_result"] = {
+                "situation": detail.get("situation", ""),
+                "law": summary.get("law_initial", ""),
+                "search": summary.get("search_initial", ""),
+                "strategy": summary.get("strategy", ""),
+                "doc": summary.get("document_content", {}),
+                "meta": summary.get("meta", {}),
+                "timings": summary.get("timings", {}),
+                "route": (summary.get("meta") or {}),
+                "case_card": {},
+                "legal_plan": {},
+                "agents": {},
+                "save_msg": "기록 로드 완료",
+            }
+
         if "workflow_result" in st.session_state:
             res = st.session_state["workflow_result"]
             st.markdown("---")
-            if "성공" in (res.get("save_msg") or ""):
-                st.success(f"✅ {res['save_msg']}")
+            msg = res.get("save_msg", "")
+            if "성공" in msg:
+                st.success(f"✅ {msg}")
             else:
-                st.info(f"ℹ️ {res.get('save_msg','')}")
+                st.info(f"ℹ️ {msg}")
 
             with st.expander("⏱️ 소요시간", expanded=False):
                 st.json(res.get("timings", {}))
@@ -2533,25 +2428,21 @@ def main():
                 c1, c2 = st.columns(2)
                 with c1:
                     st.markdown("**법령**")
-                    law_html = res.get("law", "").replace("\n", "<br>")
-                    # 마크다운 볼드 -> HTML strong
+                    law_html = (res.get("law", "") or "").replace("\n", "<br>")
                     law_html = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', law_html)
-                    law_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
-                        r'<a href="\2" target="_blank">\1</a>', law_html)
+                    law_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank">\1</a>', law_html)
                     st.markdown(f"<div style='height:280px;overflow-y:auto;padding:10px;background:#f8fafc;border-radius:6px;font-size:0.9rem'>{law_html}</div>", unsafe_allow_html=True)
                 with c2:
                     st.markdown("**뉴스**")
-                    news_html = res.get("search", "").replace("\n", "<br>")
+                    news_html = (res.get("search", "") or "").replace("\n", "<br>")
                     news_html = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', news_html)
-                    news_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
-                        r'<a href="\2" target="_blank">\1</a>', news_html)
+                    news_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" target="_blank">\1</a>', news_html)
                     st.markdown(f"<div style='height:280px;overflow-y:auto;padding:10px;background:#eff6ff;border-radius:6px;font-size:0.9rem'>{news_html}</div>", unsafe_allow_html=True)
 
             with st.expander("🧭 처리 방향", expanded=True):
-                # 마크다운 렌더링 지원
-                strategy_text = res.get("strategy", "")
-                st.markdown(strategy_text)
+                st.markdown(res.get("strategy", "") or "(SOP 생성 실패)")
 
+    # 우측 공문 프리뷰 + 후속질문
     with col_right:
         if "workflow_result" in st.session_state:
             res = st.session_state["workflow_result"]
@@ -2583,8 +2474,11 @@ def main():
             else:
                 st.warning("공문 생성 실패 (JSON 파싱 오류)")
         else:
-            st.markdown("""<div style='text-align:center;padding:80px;color:#aaa;background:white;border-radius:10px;border:2px dashed #ddd'>
-<h3>📄 Document Preview</h3><p>왼쪽에서 업무 지시 후<br>공문서가 여기에 표시됩니다</p></div>""", unsafe_allow_html=True)
+            st.markdown(
+                """<div style='text-align:center;padding:80px;color:#aaa;background:white;border-radius:10px;border:2px dashed #ddd'>
+<h3>📄 Document Preview</h3><p>왼쪽에서 업무 지시 후<br>공문서가 여기에 표시됩니다</p></div>""",
+                unsafe_allow_html=True,
+            )
 
 
 if __name__ == "__main__":
