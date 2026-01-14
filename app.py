@@ -1456,7 +1456,7 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
         sources: List[Dict[str, Any]] = []
         for x in legal_plan.get("top_laws", []) or []:
             name = (x.get("name") or "").strip()
-                    if isinstance(legal_plan, str):
+            if isinstance(legal_plan, str):
             try:
                 legal_plan = json.loads(legal_plan)
             except Exception:
