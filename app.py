@@ -1494,6 +1494,122 @@ def render_followup_chat(res: dict):
     upd = db_service.update_followup(st.session_state.get("report_id"), res, followup_data)
     if not upd.get("ok"):
         st.caption(f"⚠️ {upd.get('msg')}")
+# ==========================================
+# 8) Sidebar UI (ChatGPT Style)
+# ==========================================
+def render_sidebar_ui():
+    st.markdown("""
+    <style>
+    .sidebar-btn {
+        width: 100%;
+        text-align: left;
+        padding: 0.5rem;
+        background: transparent;
+        border: 1px solid #4b5563;
+        color: #e5e7eb;
+        border-radius: 6px;
+        margin-bottom: 4px;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+    .sidebar-btn:hover {
+        background: #374151;
+    }
+    .history-item {
+        display: block;
+        width: 100%;
+        padding: 8px 12px;
+        margin-bottom: 4px;
+        background: transparent;
+        border: none;
+        color: #d1d5db;
+        text-align: left;
+        font-size: 0.9rem;
+        border-radius: 6px;
+        cursor: pointer;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .history-item:hover {
+        background: rgba(255,255,255,0.1);
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # 1. 로고 및 타이틀
+    st.markdown("### 🏢 AI 행정관 Pro")
+    st.caption("Govable AI | kim0395kk@korea.kr")
+    
+    # 2. 새 채팅 버튼 (항상 표시)
+    if st.button("➕ 새 채팅", use_container_width=True, type="primary"):
+        for key in ["workflow_result", "report_id", "followup_messages", "followup_count", "followup_extra_context"]:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+    
+    st.markdown("---")
+
+    # 3. 로그인 상태에 따른 분기
+    if not db_service.is_logged_in():
+        st.info("로그인하여 기록을 저장하세요.")
+        with st.expander("🔐 로그인 / 회원가입", expanded=True):
+            email = st.text_input("이메일", key="login_email")
+            if email and not email.lower().endswith(KOREA_DOMAIN):
+                st.caption(f"⚠️ {KOREA_DOMAIN} 권장")
+            pw = st.text_input("비밀번호", type="password", key="login_pw")
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("로그인", use_container_width=True):
+                    r = db_service.sign_in(email, pw)
+                    if r.get("ok"):
+                        st.rerun()
+                    else:
+                        st.error(r.get("msg"))
+            with c2:
+                if st.button("가입", use_container_width=True):
+                    st.warning("관리자 문의 필요")
+
+    else:
+        # 로그인 상태: 히스토리 목록 표시
+        user_email = st.session_state.get('sb_user_email', 'User')
+        st.caption(f"👤 {user_email}")
+        
+        st.markdown("### 🗂️ 내 채팅 목록")
+        
+        # 검색 필터
+        keyword = st.text_input("검색", placeholder="기록 검색...", label_visibility="collapsed")
+        
+        # 리포트 목록 가져오기
+        rows = db_service.list_reports(limit=20, keyword=keyword)
+        
+        if not rows:
+            st.caption("저장된 기록이 없습니다.")
+        else:
+            # 스크롤 가능한 영역 (Streamlit 기본 컨테이너 활용)
+            for r in rows:
+                rid = r.get("id")
+                sit = (r.get("situation") or "제목 없음").replace("\n", " ")[:18]
+                created = (r.get("created_at") or "")[5:10] # MM-DD
+                
+                # 버튼 클릭 시 해당 리포트 로드
+                if st.button(f"📄 {sit}...", key=f"hist_{rid}", help=f"{created} 작성"):
+                    detail = db_service.get_report(rid)
+                    if detail:
+                        st.session_state["loaded_report"] = detail
+                        st.rerun()
+
+        st.markdown("---")
+        if st.button("로그아웃", use_container_width=True):
+            db_service.sign_out()
+            st.rerun()
+
+
+# ==========================================
+# 9) Main UI
+# ==========================================
+def main():
     # 다크모드 상태 초기화
     if "dark_mode" not in st.session_state:
         st.session_state["dark_mode"] = False
