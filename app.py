@@ -82,52 +82,103 @@ st.markdown(
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     }
     
-    /* Sidebar enhancement */
+    .stApp::before {
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: radial-gradient(circle at 20% 50%, rgba(120, 119, 198, 0.3), transparent 50%),
+                    radial-gradient(circle at 80% 80%, rgba(252, 70, 107, 0.3), transparent 50%),
+                    radial-gradient(circle at 40% 20%, rgba(99, 102, 241, 0.2), transparent 50%);
+        pointer-events: none;
+        z-index: 0;
+    }
+    
+    @keyframes gradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+    
+    /* Glass overlay for content */
+    [data-testid="stAppViewContainer"] > .main {
+        background: rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(10px);
+    }
+    
+    /* Premium Sidebar */
     [data-testid="stSidebar"] {
-        background: rgba(255, 255, 255, 0.85);
-        backdrop-filter: blur(20px);
-        border-right: 1px solid rgba(70, 130, 180, 0.1);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.92) 100%);
+        backdrop-filter: blur(40px) saturate(180%);
+        border-right: 2px solid rgba(120, 119, 198, 0.2);
+        box-shadow: 4px 0 24px rgba(99, 102, 241, 0.1);
     }
     
     [data-testid="stSidebar"] > div:first-child {
         padding-top: 2rem;
     }
     
-    /* Modern glassmorphic paper sheet */
+    /* Sidebar titles with gradient */
+    [data-testid="stSidebar"] h1, 
+    [data-testid="stSidebar"] h2, 
+    [data-testid="stSidebar"] h3 {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        font-weight: 800;
+    }
+    
+    /* Premium 3D paper sheet with glow */
     .paper-sheet {
-        background: rgba(255, 255, 255, 0.95);
-        backdrop-filter: blur(30px);
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(255, 255, 255, 0.95) 100%);
+        backdrop-filter: blur(40px) saturate(180%);
         width: 100%;
         max-width: 210mm;
         min-height: 297mm;
         padding: 25mm;
         margin: auto;
-        box-shadow: 0 20px 60px rgba(70, 130, 180, 0.15), 
-                    0 0 1px rgba(70, 130, 180, 0.1);
-        border: 1px solid rgba(70, 130, 180, 0.08);
+        box-shadow: 
+            0 0 60px rgba(102, 126, 234, 0.3),
+            0 30px 90px rgba(118, 75, 162, 0.2),
+            inset 0 1px 0 rgba(255, 255, 255, 0.8);
+        border: 2px solid rgba(255, 255, 255, 0.3);
         font-family: 'Inter', serif;
-        color: #1a202c;
+        color: #1a1a2e;
         line-height: 1.7;
         position: relative;
-        border-radius: 16px;
-        transition: all 0.3s ease;
+        border-radius: 24px;
+        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        transform: perspective(1000px) rotateX(0deg) rotateY(0deg);
     }
     
     .paper-sheet:hover {
-        box-shadow: 0 25px 70px rgba(70, 130, 180, 0.2),
-                    0 0 1px rgba(70, 130, 180, 0.15);
+        transform: perspective(1000px) rotateX(2deg) rotateY(-2deg) translateY(-8px);
+        box-shadow: 
+            0 0 80px rgba(102, 126, 234, 0.4),
+            0 40px 120px rgba(118, 75, 162, 0.3),
+            inset 0 1px 0 rgba(255, 255, 255, 0.9);
     }
 
     .doc-header { 
         text-align: center; 
-        font-size: 24pt; 
-        font-weight: 800; 
-        margin-bottom: 35px; 
-        letter-spacing: 1.5px;
-        background: linear-gradient(135deg, #4682b4 0%, #008080 100%);
+        font-size: 26pt; 
+        font-weight: 900; 
+        margin-bottom: 40px; 
+        letter-spacing: 2px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         background-clip: text;
+        text-shadow: 0 0 30px rgba(102, 126, 234, 0.3);
+        animation: titleGlow 3s ease-in-out infinite;
+    }
+    
+    @keyframes titleGlow {
+        0%, 100% { filter: brightness(1); }
+        50% { filter: brightness(1.2); }
     }
     
     .doc-info { 
@@ -164,121 +215,222 @@ st.markdown(
         position: absolute; 
         bottom: 85px; 
         right: 80px; 
-        border: 3px solid #cc0000; 
-        color: #cc0000; 
-        padding: 8px 14px; 
-        font-size: 13pt; 
-        font-weight: 800; 
-        transform: rotate(-12deg); 
-        opacity: 0.85; 
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.9);
-        box-shadow: 0 4px 12px rgba(204, 0, 0, 0.15);
+        border: 4px solid #dc2626; 
+        color: #dc2626; 
+        padding: 10px 18px; 
+        font-size: 14pt; 
+        font-weight: 900; 
+        transform: rotate(-15deg); 
+        opacity: 0.9; 
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.95);
+        box-shadow: 
+            0 8px 24px rgba(220, 38, 38, 0.3),
+            inset 0 1px 0 rgba(255, 255, 255, 0.5);
+        animation: stampPulse 2s ease-in-out infinite;
+    }
+    
+    @keyframes stampPulse {
+        0%, 100% { transform: rotate(-15deg) scale(1); }
+        50% { transform: rotate(-15deg) scale(1.05); }
     }
 
-    /* Modern agent logs with glassmorphism */
+    /* Premium agent logs with neon glow */
     .agent-log { 
         font-family: 'Inter', 'Consolas', monospace; 
-        font-size: 0.875rem; 
-        padding: 10px 16px; 
-        border-radius: 10px; 
-        margin-bottom: 10px; 
-        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(255, 255, 255, 0.3);
-        transition: all 0.2s ease;
+        font-size: 0.9rem; 
+        padding: 14px 20px; 
+        border-radius: 16px; 
+        margin-bottom: 12px; 
+        backdrop-filter: blur(20px) saturate(180%);
+        border: 2px solid rgba(255, 255, 255, 0.2);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .agent-log::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+        transition: left 0.5s;
+    }
+    
+    .agent-log:hover::before {
+        left: 100%;
     }
     
     .agent-log:hover {
-        transform: translateX(4px);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        transform: translateX(8px) scale(1.02);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
     }
     
     .log-legal { 
-        background: linear-gradient(135deg, rgba(70, 130, 180, 0.15), rgba(70, 130, 180, 0.08)); 
-        color: #2c5282; 
-        border-left: 4px solid #4682b4;
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.25), rgba(102, 126, 234, 0.15)); 
+        color: #3730a3; 
+        border-left: 5px solid #667eea;
+        box-shadow: 0 4px 20px rgba(102, 126, 234, 0.2);
+    }
+    
+    .log-legal:hover {
+        box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);
+        border-left-color: #5a67d8;
     }
     
     .log-search { 
-        background: linear-gradient(135deg, rgba(0, 128, 128, 0.15), rgba(0, 128, 128, 0.08)); 
-        color: #234e52; 
-        border-left: 4px solid #008080;
+        background: linear-gradient(135deg, rgba(79, 172, 254, 0.25), rgba(79, 172, 254, 0.15)); 
+        color: #0c4a6e; 
+        border-left: 5px solid #4facfe;
+        box-shadow: 0 4px 20px rgba(79, 172, 254, 0.2);
+    }
+    
+    .log-search:hover {
+        box-shadow: 0 8px 32px rgba(79, 172, 254, 0.3);
+        border-left-color: #0ea5e9;
     }
     
     .log-strat { 
-        background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(139, 92, 246, 0.08)); 
-        color: #553c9a; 
-        border-left: 4px solid #8b5cf6;
+        background: linear-gradient(135deg, rgba(168, 85, 247, 0.25), rgba(168, 85, 247, 0.15)); 
+        color: #581c87; 
+        border-left: 5px solid #a855f7;
+        box-shadow: 0 4px 20px rgba(168, 85, 247, 0.2);
+    }
+    
+    .log-strat:hover {
+        box-shadow: 0 8px 32px rgba(168, 85, 247, 0.3);
+        border-left-color: #9333ea;
     }
     
     .log-calc { 
-        background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(34, 197, 94, 0.08)); 
+        background: linear-gradient(135deg, rgba(34, 197, 94, 0.25), rgba(34, 197, 94, 0.15)); 
         color: #14532d; 
-        border-left: 4px solid #22c55e;
+        border-left: 5px solid #22c55e;
+        box-shadow: 0 4px 20px rgba(34, 197, 94, 0.2);
+    }
+    
+    .log-calc:hover {
+        box-shadow: 0 8px 32px rgba(34, 197, 94, 0.3);
+        border-left-color: #16a34a;
     }
     
     .log-draft { 
-        background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.08)); 
-        color: #7f1d1d; 
-        border-left: 4px solid #ef4444;
+        background: linear-gradient(135deg, rgba(251, 113, 133, 0.25), rgba(251, 113, 133, 0.15)); 
+        color: #881337; 
+        border-left: 5px solid #fb7185;
+        box-shadow: 0 4px 20px rgba(251, 113, 133, 0.2);
+    }
+    
+    .log-draft:hover {
+        box-shadow: 0 8px 32px rgba(251, 113, 133, 0.3);
+        border-left-color: #f43f5e;
     }
     
     .log-sys { 
-        background: linear-gradient(135deg, rgba(156, 163, 175, 0.15), rgba(156, 163, 175, 0.08)); 
-        color: #374151; 
-        border-left: 4px solid #9ca3af;
+        background: linear-gradient(135deg, rgba(148, 163, 184, 0.25), rgba(148, 163, 184, 0.15)); 
+        color: #1e293b; 
+        border-left: 5px solid #94a3b8;
+        box-shadow: 0 4px 20px rgba(148, 163, 184, 0.2);
     }
     
-    /* Enhanced buttons */
+    .log-sys:hover {
+        box-shadow: 0 8px 32px rgba(148, 163, 184, 0.3);
+        border-left-color: #64748b;
+    }
+    
+    /* Futuristic glowing buttons */
     .stButton > button {
-        background: linear-gradient(135deg, #4682b4 0%, #008080 100%);
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
-        border: none;
-        border-radius: 10px;
-        padding: 0.75rem 1.5rem;
-        font-weight: 600;
-        font-size: 0.95rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 15px rgba(70, 130, 180, 0.3);
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-radius: 16px;
+        padding: 0.9rem 2rem;
+        font-weight: 700;
+        font-size: 1rem;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 
+            0 8px 32px rgba(102, 126, 234, 0.4),
+            inset 0 1px 0 rgba(255, 255, 255, 0.2);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .stButton > button::before {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 0;
+        height: 0;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.3);
+        transform: translate(-50%, -50%);
+        transition: width 0.6s, height 0.6s;
+    }
+    
+    .stButton > button:hover::before {
+        width: 300px;
+        height: 300px;
     }
     
     .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 20px rgba(70, 130, 180, 0.4);
+        transform: translateY(-4px) scale(1.05);
+        box-shadow: 
+            0 12px 48px rgba(102, 126, 234, 0.6),
+            0 0 40px rgba(118, 75, 162, 0.4),
+            inset 0 1px 0 rgba(255, 255, 255, 0.3);
+        border-color: rgba(255, 255, 255, 0.5);
     }
     
-    /* Enhanced text inputs */
+    .stButton > button:active {
+        transform: translateY(-2px) scale(1.02);
+    }
+    
+    /* Premium text inputs with glow */
     .stTextInput > div > div > input,
     .stTextArea > div > div > textarea {
-        border: 2px solid rgba(70, 130, 180, 0.2);
-        border-radius: 10px;
-        padding: 0.75rem 1rem;
+        border: 2px solid rgba(102, 126, 234, 0.3);
+        border-radius: 16px;
+        padding: 1rem 1.25rem;
         font-family: 'Inter', sans-serif;
-        transition: all 0.3s ease;
-        background: rgba(255, 255, 255, 0.9);
+        font-size: 0.95rem;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(10px);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
     }
     
     .stTextInput > div > div > input:focus,
     .stTextArea > div > div > textarea:focus {
-        border-color: #4682b4;
-        box-shadow: 0 0 0 3px rgba(70, 130, 180, 0.1);
+        border-color: #667eea;
+        background: rgba(255, 255, 255, 1);
+        box-shadow: 
+            0 0 0 4px rgba(102, 126, 234, 0.15),
+            0 8px 24px rgba(102, 126, 234, 0.2);
+        transform: translateY(-2px);
     }
     
-    /* Enhanced expanders */
+    /* Premium expanders with gradient */
     .streamlit-expanderHeader {
-        background: linear-gradient(135deg, rgba(70, 130, 180, 0.08), rgba(0, 128, 128, 0.05));
-        border-radius: 10px;
-        border: 1px solid rgba(70, 130, 180, 0.15);
-        padding: 0.75rem 1rem;
-        font-weight: 600;
-        color: #2d3748;
-        transition: all 0.3s ease;
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.12), rgba(118, 75, 162, 0.08));
+        backdrop-filter: blur(10px);
+        border-radius: 16px;
+        border: 2px solid rgba(102, 126, 234, 0.2);
+        padding: 1rem 1.5rem;
+        font-weight: 700;
+        color: #1e293b;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 4px 16px rgba(102, 126, 234, 0.1);
     }
     
     .streamlit-expanderHeader:hover {
-        background: linear-gradient(135deg, rgba(70, 130, 180, 0.12), rgba(0, 128, 128, 0.08));
-        border-color: rgba(70, 130, 180, 0.25);
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.2), rgba(118, 75, 162, 0.15));
+        border-color: rgba(102, 126, 234, 0.4);
+        transform: translateX(4px);
+        box-shadow: 0 6px 24px rgba(102, 126, 234, 0.2);
     }
     
     /* Status indicators with modern design */
@@ -300,23 +452,52 @@ st.markdown(
     footer { display: none !important; }
     div[data-testid="stStatusWidget"] { display: none !important; }
     
-    /* Enhanced titles */
+    /* Enhanced titles with gradient and glow */
     h1, h2, h3 {
         font-family: 'Inter', sans-serif;
-        font-weight: 800;
-        color: #1a202c;
+        font-weight: 900;
+        color: #0f172a;
     }
     
     h1 {
-        background: linear-gradient(135deg, #4682b4 0%, #008080 100%);
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         background-clip: text;
+        filter: drop-shadow(0 0 20px rgba(102, 126, 234, 0.3));
+    }
+    
+    /* Status indicators with icons */
+    [data-testid="stMarkdownContainer"] p:has(> strong:first-child) {
+        padding: 0.5rem 1rem;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.7);
+        backdrop-filter: blur(10px);
+        margin: 0.5rem 0;
+    }
+    
+    /* Info boxes enhancement */
+    .stAlert {
+        border-radius: 16px;
+        border: 2px solid rgba(102, 126, 234, 0.3);
+        backdrop-filter: blur(20px);
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Success/Error badges with glow */
+    [data-testid="stMarkdownContainer"]:has(> p:first-child:contains("✅")) {
+        animation: successPulse 2s ease-in-out infinite;
+    }
+    
+    @keyframes successPulse {
+        0%, 100% { filter: brightness(1); }
+        50% { filter: brightness(1.1) drop-shadow(0 0 10px rgba(34, 197, 94, 0.5)); }
     }
 </style>
 """,
     unsafe_allow_html=True,
 )
+
 
 
 # ==========================================
@@ -401,7 +582,7 @@ def cached_law_detail_xml(api_id: str, mst_id: str) -> str:
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def cached_admrul_search(api_id: str, query: str) -> str:
-    """행정규칙(훈령/예규/고시) 검색 → ID 반환"""
+    """행정규칙(훈령/예규/고시) 검색 - ID 반환"""
     base_url = "https://www.law.go.kr/DRF/lawSearch.do"
     params = {"OC": api_id, "target": "admrul", "type": "XML", "query": query, "display": 1}
     r = http_get(base_url, params=params, timeout=10)
@@ -423,7 +604,7 @@ def cached_admrul_detail(api_id: str, admrul_id: str) -> str:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def cached_ai_search(api_id: str, query: str, top_k: int = 5) -> List[Dict[str, str]]:
-    """지능형(AIS) 검색 → 결과 목록"""
+    """지능형(AIS) 검색 - 결과 목록"""
     base_url = "https://www.law.go.kr/DRF/lawSearch.do"
     params = {"OC": api_id, "target": "aiSearch", "type": "XML", "query": query, "display": top_k}
     try:
