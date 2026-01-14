@@ -1281,7 +1281,18 @@ class AgentPrompts:
 
 class ClerkAgent:
     """기한/문서번호 산정 전용(안전 버전)"""
-
+    @staticmethod
+    def clerk(situation: str, legal_md: str, *args, **kwargs) -> dict:
+        # 예전 호출: clerk(user_input, legal_md)
+        # 신규 엔진: ClerkAgent.compute_meta(...)
+        mode = kwargs.get("mode", "A")
+        sop_text = kwargs.get("sop_text", "")
+        return ClerkAgent.compute_meta(
+            situation=situation,
+            sop_text=sop_text,
+            legal_text=legal_md,
+            mode=mode,
+        )
     @staticmethod
     def compute_meta(situation: str, sop_text: str = "", legal_text: str = "", mode: str = "A") -> dict:
         today = datetime.now(KST)
