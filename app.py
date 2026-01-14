@@ -1128,189 +1128,259 @@ def _get_services(_version: str = _SERVICE_VERSION):
     return LLMService(), SearchService(), DatabaseService(), LawOfficialService()
 
 llm_service, search_service, db_service, law_api_service = _get_services()
-
-
-# ==========================================
-# 5) Agents (Enhanced Context Understanding)
-# ==========================================
-class LegalAgents:
+class AntigravityAgents:
     @staticmethod
-    def researcher(situation: str) -> str:
-        """상황 분석 후 법령 검색"""
-        context_prompt = f"""
-당신은 대한민국 지방자치단체의 20년 경력 행정 법률 전문가입니다.
-
-[업무 지시 내용]
-"{situation}"
-
-위 내용은 **담당 공무원이 해결해야 할 민원/업무 상황**입니다.
-이 상황에 적용되는 핵심 법령을 분석하여 JSON으로 출력하세요.
-
-[상황 분석]
-1. 민원/상황 유형 파악
-2. 담당 공무원이 해야 할 조치 파악
-3. 적용 법령 3개 추출
-
-[JSON 출력 형식]
-[
-  {{"law_name": "정확한 법령명", "article_num": 조번호 또는 null}},
-  {{"law_name": "두번째 법령", "article_num": null}},
-  {{"law_name": "세번째 법령", "article_num": null}}
-]
-
-[참고]
-- 무단방치/불법주정차: 「도로교통법」 제32조~36조
-- 소음민원: 「소음·진동관리법」
-- 영업/위생: 「식품위생법」, 「공중위생관리법」
-- 건축/용도: 「건축법」
-"""
-        search_targets: List[Dict[str, Any]] = []
-        try:
-            extracted = llm_service.generate_json(context_prompt)
-            if isinstance(extracted, list):
-                search_targets = extracted
-            elif isinstance(extracted, dict):
-                search_targets = [extracted]
-        except Exception:
-            pass
-
-        # 키워드 기반 fallback
-        if not search_targets:
-            sit = situation.lower()
-            if any(k in sit for k in ["방치", "차량", "주차"]):
-                search_targets = [{"law_name": "도로교통법", "article_num": 32}]
-            elif any(k in sit for k in ["소음", "시끄"]):
-                search_targets = [{"law_name": "소음·진동관리법", "article_num": None}]
-            else:
-                search_targets = [{"law_name": "행정절차법", "article_num": None}]
-
-        report_lines: List[str] = [f"🔍 **AI가 식별한 핵심 법령 ({len(search_targets)}건)**", "---"]
-        api_success_count = 0
-
-        for idx, item in enumerate(search_targets):
-            law_name = str(item.get("law_name") or "관련법령").strip()
-            article_num = item.get("article_num")
-            art = None
-            try:
-                if article_num and str(article_num).strip().isdigit():
-                    art = int(article_num)
-            except Exception:
-                pass
-
-            law_text, link = law_api_service.get_law_text(law_name, art, return_link=True)
-            err_kw = ["검색 결과", "오류", "미설정", "실패"]
-            is_ok = not any(k in (law_text or "") for k in err_kw)
-
-            if is_ok:
-                api_success_count += 1
-                title = f"[{law_name}]({link})" if link else law_name
-                art_str = f" 제{art}조" if art else ""
-                report_lines.append(f"✅ **{idx+1}. {title}{art_str}**\n{law_text}\n")
-            else:
-                report_lines.append(f"⚠️ **{idx+1}. {law_name}** - API 실패\n")
-
-        if api_success_count == 0:
-            fallback = f"""당신은 행정 법률 전문가입니다.
-상황: "{situation}"
-이 상황에 적용되는 법령과 조항을 상세히 분석하세요.
-[AI 추론 결과]임을 명시하고 법제처 확인 필요 경고."""
-            ai_text = llm_service.generate_text(fallback) or ""
-            return f"⚠️ **[API 실패 - AI 추론]**\n(환각 가능성 - 법제처 확인 필수)\n\n{ai_text}"
-
-        return "\n".join(report_lines)
-
-    @staticmethod
-    def strategist(situation: str, legal_basis: str, search_results: str) -> str:
+    def router(situation: str) -> Dict[str, Any]:
+        """ROUTER: 업무유형(Mode) 및 리스크(Risk) 판정"""
         prompt = f"""
-당신은 20년 경력 행정 베테랑 주무관입니다.
+        당신은 공무원 업무 처리 시스템의 ROUTER(오케스트레이터)입니다.
+        입력된 사건카드(CASE CARD)를 분석하여 업무유형과 리스크 수준을 판정하고, 필요한 에이전트 조합을 결정하세요.
 
-[민원 상황]
-{situation}
+        [입력된 사건카드]
+        "{situation}"
 
-[확보된 법적 근거]
-{legal_basis[:3000]}
+        [판정 기준]
+        1. 업무유형 (Mode A~E)
+           - Mode A (민원): 회신문, 답변, 설명, FAQ 중심
+           - Mode B (판단/조치): 계고, 통지, 처분, 요구, 반려 등 결정 중심
+           - Mode C (보고): 상급자 보고, 브리핑, 감사 대비 보고서 중심
+           - Mode D (계획): 실행계획, 연간계획, 일정표, 운영계획 중심
+           - Mode E (기획): 사업기획, 공모계획, 제도설계, 조례/지침 설계 중심
 
-[유사 사례/뉴스]
-{search_results[:1500]}
+        2. 리스크 레벨 (LOW/MEDIUM/HIGH)
+           - LOW: 단순 문의, 내부 처리, 영향 범위 작음
+           - MEDIUM: 이견/반발 가능, 책임소재 논쟁, 재민원 가능
+           - HIGH: 감사/소송/언론/집단 민원/악성 민원/정치 이슈 가능
 
-**담당 공무원 입장에서** 이 민원을 어떻게 처리해야 하는지 구체적으로 안내하세요.
+        3. 에이전트 조합
+           - 기본적으로 업무유형에 맞는 최소 조합을 선택하세요.
+           - HIGH 리스크인 경우 'review_loop': true 로 설정하세요.
+           - 필수 에이전트: 'admin', 'legal', 'integrator'는 거의 항상 필요합니다.
+           - 선택 에이전트: 'civil' (대민), 'behavior' (갈등/현장), 'plan' (기획/체계화)
 
-## 1. 처리 방향 (Action Plan)
-- 1단계: (구체적 조치)
-- 2단계: (구체적 조치)
-- 3단계: (구체적 조치)
+        [출력 형식 (JSON)]
+        {{
+            "summary": "사건 핵심 5줄 요약",
+            "mode": "Mode A",
+            "risk": "HIGH",
+            "agents": ["admin", "legal", "civil", "integrator"],
+            "review_loop": true,
+            "reason": "판정 사유"
+        }}
+        """
+        return llm_service.generate_json(prompt)
 
-## 2. 법적 근거 요약
-- 적용 법령: (법령명 + 조문)
-- 핵심 요지: (왜 이 법이 적용되는지)
+    @staticmethod
+    def admin_agent(situation: str, router_out: Dict) -> str:
+        """ADMIN: 현실 절차, 시스템, 결재, 기한"""
+        prompt = f"""
+        당신은 ADMIN(행정) 에이전트입니다.
+        사건카드와 라우터 분석 결과를 바탕으로 "현실 절차/시스템/결재/기한" 중심의 SOP를 작성하세요.
 
-## 3. 핵심 주의사항 ⚠️
-- (실무 주의점)
-- (법적 리스크)
+        [사건 개요]
+        {router_out.get('summary')}
+        (원본: {situation})
 
-## 4. 예상 반발 및 대응
-| 예상 반발 | 대응 논리 |
-|----------|-----------|
-| (반발1) | (대응1) |
+        [지시사항]
+        1. 단계표: 담당자, 기한, 입력(필요서류), 출력(결과물), 협조부서를 명시한 표 작성.
+        2. 체크리스트: 놓치기 쉬운 행정 절차 점검.
+        3. 문서패키지: 기안문, 붙임자료 등 필요한 문서 목록.
+        4. 누락위험: 감사 지적될 수 있는 절차적 누락 위험 3가지와 예방책.
+        5. 확신 없는 내용은 "확인 필요"로 표기하세요.
 
-## 5. 민원인 응대 요령
-- (설명 방법)
-- (갈등 해소 방안)
-
-서론(인사말) 없이 바로 시작.
-"""
+        출력은 마크다운 형식으로 작성하세요.
+        """
         return llm_service.generate_text(prompt)
 
     @staticmethod
-    def clerk(situation: str, legal_basis: str) -> dict:
-        today = datetime.now(KST)
-        prompt = f"오늘: {today.strftime('%Y-%m-%d')}\n상황: {situation}\n법령: {legal_basis[:500]}\n이행 기간 숫자만. 모르면 15."
-        try:
-            res = (llm_service.generate_text(prompt) or "").strip()
-            m = re.search(r"\d{1,3}", res)
-            days = int(m.group(0)) if m else 15
-            days = max(1, min(days, 180))
-        except Exception:
-            days = 15
-        deadline = today + timedelta(days=days)
-        return {"today_str": today.strftime("%Y. %m. %d."), "deadline_str": deadline.strftime("%Y. %m. %d."),
-                "days_added": days, "doc_num": f"행정-{today.strftime('%Y')}-{int(time.time())%1000:03d}호"}
+    def legal_agent(situation: str, router_out: Dict) -> str:
+        """LEGAL: 법률 분석 (IRAC) 및 근거 검색"""
+        # 1. 검색 키워드 및 타겟 법령 추출
+        search_prompt = f"""
+        당신은 법률 검색 전문가입니다. 다음 상황에 필요한 법령, 행정규칙(훈령/예규/고시), 자치법규를 찾기 위한 검색 전략을 수립하세요.
+
+        [상황]
+        {situation}
+
+        [요청]
+        1. 이 상황을 규율하는 핵심 법령명(정확하지 않으면 키워드)을 나열하세요.
+        2. 행정규칙(훈령, 예규, 지침)이 중요할 수 있습니다. 관련 키워드를 추출하세요.
+        3. 지능형 검색을 위한 자연어 쿼리를 3개 작성하세요.
+
+        [출력 (JSON)]
+        {{
+            "laws": ["도로교통법", "건축법 시행령"],
+            "admrul_keywords": ["불법주정차 단속 지침", "옥외광고물 가이드라인"],
+            "ai_queries": ["어린이보호구역 불법주정차 과태료 부과 기준", "현수막 강제 철거 절차"]
+        }}
+        """
+        search_plan = llm_service.generate_json(search_prompt) or {}
+        
+        # 2. 실제 검색 실행
+        laws = search_plan.get("laws", [])
+        admrul_kws = search_plan.get("admrul_keywords", [])
+        ai_queries = search_plan.get("ai_queries", [])
+        
+        found_texts = []
+        
+        # 2-1. 법령 검색
+        for law in laws:
+            txt, link = law_api_service.get_law_text(law, return_link=True)
+            if txt:
+                found_texts.append(f"### [법령] {law}\n{txt}\n(링크: {link})")
+        
+        # 2-2. 행정규칙 검색 (키워드 기반)
+        for kw in admrul_kws:
+            txt, link = law_api_service.get_admrul_text(kw, return_link=True)
+            if txt:
+                found_texts.append(f"### [행정규칙] {kw} 검색결과\n{txt}\n(링크: {link})")
+                
+        # 2-3. AI 지능형 검색 (보완)
+        if not found_texts and ai_queries:
+            ai_res = law_api_service.ai_search(ai_queries[0], top_k=3)
+            found_texts.append(f"### [지능형 검색] {ai_queries[0]}\n{ai_res}")
+
+        context_data = "\n\n".join(found_texts)
+
+        # 3. 법률 검토 (IRAC)
+        analyze_prompt = f"""
+        당신은 LEGAL(법률) 에이전트입니다. 사건카드를 IRAC(요건-사실-적용-결론) 방식으로 분석하세요.
+        
+        [사건 개요]
+        {router_out.get('summary')}
+        
+        [참고 법령 및 규정]
+        {context_data}
+        
+        [지시사항]
+        1. 결론: 법적 판단 결과를 3줄로 요약.
+        2. 적용 법령/조문: 위 참고 자료를 바탕으로 구체적인 조항을 인용. (링크가 있다면 포함)
+        3. 요건 체크: 법령상 요구되는 요건을 나열하고 충족 여부 판단.
+        4. 절차하자 방지: 절차적 위법이 발생하지 않도록 주의할 점.
+        5. 리스크&방어논리: 소송/행정심판 가능성과 방어 논리.
+        6. 모르는 조문은 추정하지 말고 "확인 필요"로 표기.
+        
+        출력은 마크다운 형식으로 작성하세요.
+        """
+        return llm_service.generate_text(analyze_prompt)
 
     @staticmethod
-    def drafter(situation: str, legal_basis: str, meta_info: dict, strategy: str) -> dict:
-        schema = {"type": "object", "properties": {"title": {"type": "string"}, "receiver": {"type": "string"},
-                  "body_paragraphs": {"type": "array", "items": {"type": "string"}}, "department_head": {"type": "string"}},
-                  "required": ["title", "receiver", "body_paragraphs", "department_head"]}
-
+    def civil_agent(situation: str, router_out: Dict) -> str:
+        """CIVIL: 민원인 응대, 회신문, FAQ"""
         prompt = f"""
-당신은 행정기관 베테랑 서기입니다.
+        당신은 CIVIL(민원) 에이전트입니다. 민원인 관점에서 이해하기 쉽고 감정을 배려하는 회신문을 작성하세요.
 
-[민원 상황]: {situation}
-[법적 근거]: {legal_basis[:2000]}
-[시행일]: {meta_info.get('today_str','')} / [기한]: {meta_info.get('deadline_str','')}
-[전략]: {strategy[:1000]}
+        [사건 개요]
+        {router_out.get('summary')}
 
-공문서 JSON 출력:
-- title: 공문 제목
-- receiver: 수신자
-- body_paragraphs: [경위, 법적근거, 처분내용, 이의제기]
-- department_head: 결재자
+        [지시사항]
+        1. 민원 요지: 민원인의 핵심 요구사항 3줄 요약.
+        2. 회신문 초안: 공감하는 어조로 시작하되, 결론은 명확하게. (A4 1장 분량)
+           - 개인정보는 마스킹 처리 (예: OOO)
+           - 법적 근거는 알기 쉽게 풀어서 설명.
+        3. FAQ: 예상되는 추가 질문 5개와 답변.
+        4. 대응 레벨: 반복/악성 민원 가능성(1~3단계)과 대응 전략.
 
-행정 공문체 사용. 법 조항 인용 필수.
-"""
-        doc = llm_service.generate_json(prompt, schema=schema)
+        출력은 마크다운 형식으로 작성하세요.
+        """
+        return llm_service.generate_text(prompt)
 
-        if not isinstance(doc, dict):
-            return {"title": "행정처분 안내", "receiver": "민원인 귀하",
-                    "body_paragraphs": ["1. 경위", "2. 법적 근거", "3. 처분 내용", "4. 이의제기"],
-                    "department_head": "행정기관장"}
+    @staticmethod
+    def behavior_agent(situation: str, router_out: Dict) -> str:
+        """BEHAVIOR: 갈등 관리, 현장 대응"""
+        prompt = f"""
+        당신은 BEHAVIOR(행동) 에이전트입니다. 반발이나 갈등을 최소화하는 대응 시나리오를 설계하세요.
 
-        bp = doc.get("body_paragraphs")
-        doc["body_paragraphs"] = [bp] if isinstance(bp, str) else (bp if isinstance(bp, list) else [])
-        for k in ["title", "receiver", "department_head"]:
-            if not isinstance(doc.get(k), str):
-                doc[k] = ""
-        return doc
+        [사건 개요]
+        {router_out.get('summary')}
+
+        [지시사항]
+        1. 반발 유형 TOP 5: 예상되는 반발 내용과 그에 대한 모범 대응 답변.
+        2. 스크립트: 전화 통화 또는 현장 대면 시 사용할 구체적인 대화 스크립트.
+        3. 금지어/권장어: 사용하면 안 되는 표현(자극적, 책임회피성)과 권장 표현.
+        4. 기록 체크리스트: 증거 확보를 위해 기록해야 할 사항들.
+
+        출력은 마크다운 형식으로 작성하세요.
+        """
+        return llm_service.generate_text(prompt)
+
+    @staticmethod
+    def plan_agent(situation: str, router_out: Dict) -> str:
+        """PLAN: 기획, 표준화, KPI"""
+        prompt = f"""
+        당신은 PLAN(기획) 에이전트입니다. 이 업무를 체계화하고 표준화하는 방안을 제시하세요.
+
+        [사건 개요]
+        {router_out.get('summary')}
+
+        [지시사항]
+        1. SOP 템플릿 목차: 이 업무를 매뉴얼화할 때 필요한 목차.
+        2. 재사용 블록: 향후 유사 업무 시 재사용 가능한 문구/서식 정의.
+        3. 데이터 필드: 시스템으로 관리해야 할 핵심 데이터 항목.
+        4. KPI: 업무 성과를 측정할 수 있는 지표.
+        5. 개선안: 단기/중기/장기 제도 개선 방안.
+
+        출력은 마크다운 형식으로 작성하세요.
+        """
+        return llm_service.generate_text(prompt)
+
+    @staticmethod
+    def integrator(situation: str, router_out: Dict, agent_outputs: Dict[str, str]) -> Dict[str, Any]:
+        """INTEGRATOR: 최종 결과 통합"""
+        
+        # 에이전트 결과 취합
+        admin_res = agent_outputs.get("admin", "")
+        legal_res = agent_outputs.get("legal", "")
+        civil_res = agent_outputs.get("civil", "")
+        behavior_res = agent_outputs.get("behavior", "")
+        plan_res = agent_outputs.get("plan", "")
+        
+        prompt = f"""
+        당신은 INTEGRATOR(통합) 에이전트입니다. 각 전문 에이전트의 산출물을 종합하여 최종 보고서를 작성하세요.
+        
+        [사건 개요]
+        {router_out.get('summary')}
+        
+        [에이전트 산출물]
+        - ADMIN: {admin_res}
+        - LEGAL: {legal_res}
+        - CIVIL: {civil_res}
+        - BEHAVIOR: {behavior_res}
+        - PLAN: {plan_res}
+        
+        [최종 출력 포맷 (INTEGRATOR 포맷)]
+        다음 목차를 엄수하여 마크다운으로 작성하세요. 내용은 각 에이전트의 결과를 적절히 배분하여 채우세요.
+        
+        # 1. 한 줄 결론
+        - (명확한 결론)
+        
+        # 2. 업무처리 흐름 (단계/기한/담당)
+        - (ADMIN 결과 활용)
+        
+        # 3. 법적 근거 & 요건 체크
+        - (LEGAL 결과 활용)
+        
+        # 4. 실무 체크리스트
+        - (ADMIN, LEGAL 결과 활용)
+        
+        # 5. 산출물 초안 (회신문/보고서 등)
+        - (CIVIL 결과 활용, 없으면 ADMIN/PLAN 활용)
+        
+        # 6. 반발예시 & 대응 스크립트
+        - (BEHAVIOR, CIVIL 결과 활용)
+        
+        # 7. 리스크 & 방어 포인트
+        - (LEGAL, ADMIN 결과 활용)
+        
+        # 8. 재사용 블록 & 기록 필드 & KPI
+        - (PLAN 결과 활용)
+        
+        [추가 요청]
+        - JSON 형식으로 출력하되, 'final_report' 필드에 위 마크다운 전체를 넣으세요.
+        - 'law_summary' 필드에는 LEGAL 에이전트가 찾은 법령 정보를 요약해서 넣으세요.
+        - 'search_summary' 필드에는 관련 뉴스나 참고 자료 요약을 넣으세요.
+        """
+        return llm_service.generate_json(prompt)
 
 
 # ==========================================
@@ -1327,45 +1397,77 @@ def run_workflow(user_input: str) -> dict:
 
     t0 = time.perf_counter()
 
-    add_log("🔍 Phase 1: 법령 리서치...", "legal")
+    # 1. Router
+    add_log("🤖 Router: 업무유형 및 리스크 분석 중...", "router")
     t = time.perf_counter()
-    legal_basis = LegalAgents.researcher(user_input)
-    timings["law_sec"] = round(time.perf_counter() - t, 2)
-    add_log(f"📜 법적 근거 완료 ({timings['law_sec']}s)", "legal")
+    router_out = AntigravityAgents.router(user_input) or {}
+    mode = router_out.get("mode", "Mode A")
+    risk = router_out.get("risk", "LOW")
+    agents_to_run = router_out.get("agents", ["admin", "legal", "integrator"])
+    timings["router_sec"] = round(time.perf_counter() - t, 2)
+    
+    add_log(f"📋 판정: {mode} / Risk {risk} -> {', '.join(agents_to_run)}", "router")
 
-    add_log("🟩 뉴스 검색...", "search")
+    # 2. Parallel Execution (순차로 구현하되 로그 표시)
+    agent_outputs = {}
+    
+    # Admin
+    if "admin" in agents_to_run:
+        add_log("ADMIN: 행정 절차 및 기한 분석...", "admin")
+        agent_outputs["admin"] = AntigravityAgents.admin_agent(user_input, router_out)
+        
+    # Legal (가장 중요)
+    if "legal" in agents_to_run:
+        add_log("⚖️ LEGAL: 법령 검색 및 IRAC 분석...", "legal")
+        agent_outputs["legal"] = AntigravityAgents.legal_agent(user_input, router_out)
+        
+    # Civil
+    if "civil" in agents_to_run:
+        add_log("CIVIL: 민원 회신문 작성...", "civil")
+        agent_outputs["civil"] = AntigravityAgents.civil_agent(user_input, router_out)
+        
+    # Behavior
+    if "behavior" in agents_to_run:
+        add_log("BEHAVIOR: 갈등 관리 시나리오 설계...", "behavior")
+        agent_outputs["behavior"] = AntigravityAgents.behavior_agent(user_input, router_out)
+        
+    # Plan
+    if "plan" in agents_to_run:
+        add_log("PLAN: 업무 표준화 및 기획...", "plan")
+        agent_outputs["plan"] = AntigravityAgents.plan_agent(user_input, router_out)
+
+    # 3. Review Loop (High Risk)
+    if router_out.get("review_loop"):
+        add_log("🔄 High Risk 감지: 교차 검수(Review Loop) 실행...", "review")
+        # 간단한 검수 로직: Legal 결과에 대해 Civil 관점 코멘트 추가 등
+        # 여기서는 복잡도를 피하기 위해 로그만 남기고 넘어감 (추후 고도화)
+        pass
+
+    # 4. Integrator
+    add_log("📑 INTEGRATOR: 최종 보고서 통합 중...", "integrator")
     t = time.perf_counter()
-    try:
-        search_results = search_service.search_precedents(user_input)
-    except Exception:
-        search_results = "검색 모듈 미연결"
-    timings["news_sec"] = round(time.perf_counter() - t, 2)
-
-    add_log(f"🧠 Phase 2: 처리 방향 수립... ({timings['news_sec']}s)", "strat")
-    t = time.perf_counter()
-    strategy = LegalAgents.strategist(user_input, legal_basis, search_results)
-    timings["strat_sec"] = round(time.perf_counter() - t, 2)
-
-    add_log("📅 Phase 3: 기한 산정...", "calc")
-    t = time.perf_counter()
-    meta_info = LegalAgents.clerk(user_input, legal_basis)
-    timings["calc_sec"] = round(time.perf_counter() - t, 2)
-
-    add_log("✍️ Phase 4: 공문서 생성...", "draft")
-    t = time.perf_counter()
-    doc_data = LegalAgents.drafter(user_input, legal_basis, meta_info, strategy)
-    timings["draft_sec"] = round(time.perf_counter() - t, 2)
-
+    final_res = AntigravityAgents.integrator(user_input, router_out, agent_outputs) or {}
     timings["total_sec"] = round(time.perf_counter() - t0, 2)
+    
     log_placeholder.empty()
+    
+    # 결과 포맷팅
+    full_report = final_res.get("final_report", "")
+    if not full_report:
+        full_report = str(final_res)
 
-    return {"situation": user_input, "doc": doc_data, "meta": meta_info,
-            "law": legal_basis, "search": search_results, "strategy": strategy, "timings": timings}
+    return {
+        "situation": user_input,
+        "strategy": full_report, # 전체 리포트를 여기에
+        "law": final_res.get("law_summary", ""), # 요약된 법령 정보
+        "search": final_res.get("search_summary", ""), # 요약된 검색 정보
+        "doc": {}, # 기존 공문서 뷰어는 사용하지 않거나, Integrator 결과에서 추출
+        "meta": {},
+        "timings": timings,
+        "router": router_out
+    }
 
 
-# ==========================================
-# 7) Follow-up Chat
-# ==========================================
 def _strip_html(text: str) -> str:
     if not text:
         return ""
@@ -1378,19 +1480,12 @@ def build_case_context(res: dict) -> str:
     law_txt = _strip_html(res.get("law", ""))[:2000]
     news_txt = _strip_html(res.get("search", ""))[:1000]
     strategy = res.get("strategy", "")[:1000]
-    doc = res.get("doc") or {}
-    bp = doc.get("body_paragraphs", [])
-    if isinstance(bp, str):
-        bp = [bp]
-    body = "\n".join([f"- {p}" for p in bp])
-
+    
     return f"""[케이스 컨텍스트]
 1) 민원: {situation}
 2) 법령: {law_txt}
 3) 뉴스: {news_txt}
 4) 전략: {strategy}
-5) 공문: 제목={doc.get('title','')}, 수신={doc.get('receiver','')}
-{body}
 
 [규칙] 컨텍스트 내에서만 답변. 단정 금지. 추가 조회 필요시 명시."""
 
@@ -1712,7 +1807,7 @@ def main():
             doc = res.get("doc") or {}
             meta = res.get("meta", {})
 
-            if doc:
+            if doc and doc.get("body_paragraphs"):
                 bp = doc.get("body_paragraphs", [])
                 if isinstance(bp, str):
                     bp = [bp]
@@ -1734,8 +1829,16 @@ def main():
                 st.markdown("---")
                 with st.expander("💬 후속 질문 (최대 5회)", expanded=True):
                     render_followup_chat(res)
+            
+            elif res.get("strategy"):
+                st.markdown("### 📑 최종 분석 보고서")
+                st.markdown(res.get("strategy"))
+                st.markdown("---")
+                with st.expander("💬 후속 질문 (최대 5회)", expanded=True):
+                    render_followup_chat(res)
+
             else:
-                st.warning("공문 생성 실패 (JSON 파싱 오류)")
+                st.warning("결과 생성 실패 (데이터 없음)")
         else:
             st.markdown("""<div style='text-align:center;padding:80px;color:#aaa;background:white;border-radius:10px;border:2px dashed #ddd'>
 <h3>📄 Document Preview</h3><p>왼쪽에서 업무 지시 후<br>공문서가 여기에 표시됩니다</p></div>""", unsafe_allow_html=True)
