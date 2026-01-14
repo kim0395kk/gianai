@@ -1904,7 +1904,7 @@ def run_workflow(user_input: str) -> dict:
     t = time.perf_counter()
     case_card = MultiAgentSystem.extract_case_card(user_input)
     route = MultiAgentSystem.route(case_card)
-        if route.get("risk_level") not in ["LOW", "MEDIUM", "HIGH"]:
+    if route.get("risk_level") not in ["LOW", "MEDIUM", "HIGH"]:
         route["risk_level"] = "LOW"
     if route.get("mode") not in ["A", "B", "C", "D", "E"]:
         route["mode"] = "A"
