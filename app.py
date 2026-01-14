@@ -1131,186 +1131,624 @@ llm_service, search_service, db_service, law_api_service = _get_services()
 
 
 # ==========================================
-# 5) Agents (Enhanced Context Understanding)
+# 5) Agents (Router + Multi-Agent Orchestrator)
 # ==========================================
-class LegalAgents:
+MODE_LABEL = {
+    "A": "민원 회신 중심",
+    "B": "판단·조치결정 중심",
+    "C": "보고 중심",
+    "D": "계획 수립 중심",
+    "E": "기획(신규사업/제도설계) 중심",
+}
+
+RISK_HINT = {
+    "LOW": "단순 문의/내부처리/파급 작음",
+    "MEDIUM": "이견·반발 가능/재민원 우려/책임소재 논쟁",
+    "HIGH": "감사/소송/언론/집단·악성 민원/정치 이슈 우려",
+}
+
+
+def _compact(text: str, limit: int = 2500) -> str:
+    t = (text or "").strip()
+    return t[:limit] + ("..." if len(t) > limit else "")
+
+
+def _json_or_fallback(prompt: str, schema: dict, fallback: dict) -> dict:
+    j = llm_service.generate_json(prompt, schema=schema)
+    return j if isinstance(j, dict) else fallback
+
+
+def _list_or_fallback(prompt: str, fallback: list) -> list:
+    j = llm_service.generate_json(prompt)
+    return j if isinstance(j, list) else fallback
+
+
+class AgentPrompts:
+    """모든 에이전트가 ‘고급스럽게’ 나오도록 공통 스타일/규칙을 강제"""
+
     @staticmethod
-    def researcher(situation: str) -> str:
-        """상황 분석 후 법령 검색"""
-        context_prompt = f"""
-당신은 대한민국 지방자치단체의 20년 경력 행정 법률 전문가입니다.
-
-[업무 지시 내용]
-"{situation}"
-
-위 내용은 **담당 공무원이 해결해야 할 민원/업무 상황**입니다.
-이 상황에 적용되는 핵심 법령을 분석하여 JSON으로 출력하세요.
-
-[상황 분석]
-1. 민원/상황 유형 파악
-2. 담당 공무원이 해야 할 조치 파악
-3. 적용 법령 3개 추출
-
-[JSON 출력 형식]
-[
-  {{"law_name": "정확한 법령명", "article_num": 조번호 또는 null}},
-  {{"law_name": "두번째 법령", "article_num": null}},
-  {{"law_name": "세번째 법령", "article_num": null}}
-]
-
-[참고]
-- 무단방치/불법주정차: 「도로교통법」 제32조~36조
-- 소음민원: 「소음·진동관리법」
-- 영업/위생: 「식품위생법」, 「공중위생관리법」
-- 건축/용도: 「건축법」
+    def style_rules() -> str:
+        return """
+[출력 스타일]
+- 결론을 먼저 제시하고, 근거/절차/리스크를 뒤에 배치.
+- 말투는 '행정 공문/내부 보고' 수준의 격식(구어체/비속어 금지).
+- 불확실한 부분은 '확인 필요'로 명시(추정/단정 금지).
+- 개인정보(성명·연락처·주소·차량번호 등) 예시 작성 시 마스킹.
+- 반드시 표/체크리스트/단계별 목록을 포함해 재사용 가능하게 구성.
 """
-        search_targets: List[Dict[str, Any]] = []
-        try:
-            extracted = llm_service.generate_json(context_prompt)
-            if isinstance(extracted, list):
-                search_targets = extracted
-            elif isinstance(extracted, dict):
-                search_targets = [extracted]
-        except Exception:
-            pass
-
-        # 키워드 기반 fallback
-        if not search_targets:
-            sit = situation.lower()
-            if any(k in sit for k in ["방치", "차량", "주차"]):
-                search_targets = [{"law_name": "도로교통법", "article_num": 32}]
-            elif any(k in sit for k in ["소음", "시끄"]):
-                search_targets = [{"law_name": "소음·진동관리법", "article_num": None}]
-            else:
-                search_targets = [{"law_name": "행정절차법", "article_num": None}]
-
-        report_lines: List[str] = [f"🔍 **AI가 식별한 핵심 법령 ({len(search_targets)}건)**", "---"]
-        api_success_count = 0
-
-        for idx, item in enumerate(search_targets):
-            law_name = str(item.get("law_name") or "관련법령").strip()
-            article_num = item.get("article_num")
-            art = None
-            try:
-                if article_num and str(article_num).strip().isdigit():
-                    art = int(article_num)
-            except Exception:
-                pass
-
-            law_text, link = law_api_service.get_law_text(law_name, art, return_link=True)
-            err_kw = ["검색 결과", "오류", "미설정", "실패"]
-            is_ok = not any(k in (law_text or "") for k in err_kw)
-
-            if is_ok:
-                api_success_count += 1
-                title = f"[{law_name}]({link})" if link else law_name
-                art_str = f" 제{art}조" if art else ""
-                report_lines.append(f"✅ **{idx+1}. {title}{art_str}**\n{law_text}\n")
-            else:
-                report_lines.append(f"⚠️ **{idx+1}. {law_name}** - API 실패\n")
-
-        if api_success_count == 0:
-            fallback = f"""당신은 행정 법률 전문가입니다.
-상황: "{situation}"
-이 상황에 적용되는 법령과 조항을 상세히 분석하세요.
-[AI 추론 결과]임을 명시하고 법제처 확인 필요 경고."""
-            ai_text = llm_service.generate_text(fallback) or ""
-            return f"⚠️ **[API 실패 - AI 추론]**\n(환각 가능성 - 법제처 확인 필수)\n\n{ai_text}"
-
-        return "\n".join(report_lines)
 
     @staticmethod
-    def strategist(situation: str, legal_basis: str, search_results: str) -> str:
+    def case_card_schema() -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "task_title": {"type": "string"},
+                "task_type": {"type": "string"},
+                "goal": {"type": "string"},
+                "facts_timeline": {"type": "array", "items": {"type": "string"}},
+                "evidence": {"type": "array", "items": {"type": "string"}},
+                "stakeholders": {"type": "array", "items": {"type": "string"}},
+                "constraints": {"type": "array", "items": {"type": "string"}},
+                "risks": {"type": "array", "items": {"type": "string"}},
+                "deliverable": {"type": "string"},
+                "questions": {"type": "array", "items": {"type": "string"}},
+                "keywords": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["task_type", "goal", "facts_timeline", "deliverable"],
+        }
+
+    @staticmethod
+    def route_schema() -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "risk_level": {"type": "string"},
+                "agents": {"type": "array", "items": {"type": "string"}},
+                "followup_questions": {"type": "array", "items": {"type": "string"}},
+                "legal_query_seed": {"type": "string"},
+            },
+            "required": ["mode", "risk_level", "agents"],
+        }
+
+    @staticmethod
+    def legal_plan_schema() -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "workflow_steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step": {"type": "string"},
+                            "purpose": {"type": "string"},
+                            "must_check": {"type": "array", "items": {"type": "string"}},
+                            "legal_sources": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "doc_type": {"type": "string"},  # "law" or "admrul"
+                                        "article_num": {"type": "integer"},
+                                        "priority": {"type": "integer"},
+                                        "why": {"type": "string"},
+                                    },
+                                    "required": ["name", "doc_type", "priority", "why"],
+                                },
+                            },
+                        },
+                        "required": ["step", "purpose", "legal_sources"],
+                    },
+                },
+                "top_laws": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "include_subregs": {"type": "boolean"},  # 시행령/시행규칙까지 확장 여부
+                            "why": {"type": "string"},
+                        },
+                        "required": ["name", "include_subregs", "why"],
+                    },
+                },
+                "top_admrul": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}, "why": {"type": "string"}},
+                        "required": ["name", "why"],
+                    },
+                },
+            },
+            "required": ["workflow_steps", "top_laws", "top_admrul"],
+        }
+
+    @staticmethod
+    def doc_schema() -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "receiver": {"type": "string"},
+                "body_paragraphs": {"type": "array", "items": {"type": "string"}},
+                "department_head": {"type": "string"},
+            },
+            "required": ["title", "receiver", "body_paragraphs", "department_head"],
+        }
+
+
+class MultiAgentSystem:
+    """ROUTER → (LEGAL/ADMIN/CIVIL/BEHAVIOR/PLAN) → INTEGRATOR"""
+
+    @staticmethod
+    def extract_case_card(user_input: str) -> dict:
+        schema = AgentPrompts.case_card_schema()
         prompt = f"""
-당신은 20년 경력 행정 베테랑 주무관입니다.
+너는 대한민국 지방자치단체(시·군·구) 실무를 이해하는 '업무 분석관'이다.
+아래 업무지시를 사건카드로 구조화하라. 질문이 필요하면 최대 5개까지만.
 
-[민원 상황]
-{situation}
+[업무 지시]
+{user_input}
 
-[확보된 법적 근거]
-{legal_basis[:3000]}
+[출력]
+- 반드시 JSON만 출력.
+- facts_timeline은 시간순(알 수 없으면 "시점 불명")으로 3~7개.
+- deliverable은 "회신문/통지/계고/보고/계획/기획서" 중 가장 가까운 1개로.
+- keywords는 법령/분야 키워드 5~10개.
+"""
+        fallback = {
+            "task_title": "업무 처리",
+            "task_type": "미분류",
+            "goal": "민원을 처리하고 행정적으로 정리",
+            "facts_timeline": [user_input[:120] if user_input else "입력 없음"],
+            "evidence": [],
+            "stakeholders": ["민원인", "담당부서"],
+            "constraints": [],
+            "risks": [],
+            "deliverable": "회신문",
+            "questions": [],
+            "keywords": [],
+        }
+        return _json_or_fallback(prompt, schema, fallback)
 
-[유사 사례/뉴스]
-{search_results[:1500]}
+    @staticmethod
+    def route(case_card: dict) -> dict:
+        schema = AgentPrompts.route_schema()
+        prompt = f"""
+너는 공무원 업무 라우터다. 사건카드를 보고 업무유형(Mode)과 리스크를 판정하고
+필요한 에이전트만 최소 조합으로 선택하라.
 
-**담당 공무원 입장에서** 이 민원을 어떻게 처리해야 하는지 구체적으로 안내하세요.
+[업무유형 Mode]
+A=민원 회신 중심, B=판단·조치결정 중심, C=보고 중심, D=계획 수립 중심, E=기획(제도/사업)
 
-## 1. 처리 방향 (Action Plan)
-- 1단계: (구체적 조치)
-- 2단계: (구체적 조치)
-- 3단계: (구체적 조치)
+[리스크]
+LOW/MEDIUM/HIGH
 
-## 2. 법적 근거 요약
-- 적용 법령: (법령명 + 조문)
-- 핵심 요지: (왜 이 법이 적용되는지)
+[에이전트]
+ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
+- INTEGRATOR는 항상 포함.
+- LOW는 2~3명, MEDIUM은 3~4명, HIGH는 4~6명 권장.
+- followup_questions는 최대 5개.
 
-## 3. 핵심 주의사항 ⚠️
-- (실무 주의점)
-- (법적 리스크)
+[사건카드]
+{json.dumps(case_card, ensure_ascii=False)}
 
-## 4. 예상 반발 및 대응
-| 예상 반발 | 대응 논리 |
-|----------|-----------|
-| (반발1) | (대응1) |
+반드시 JSON만 출력.
+"""
+        # fallback(휴리스틱)
+        text = (case_card.get("deliverable") or "") + " " + " ".join(case_card.get("facts_timeline") or [])
+        t = text.lower()
+        mode = "A"
+        if any(k in t for k in ["계획", "운영", "일정", "로드맵"]):
+            mode = "D"
+        if any(k in t for k in ["기획", "사업", "공모", "제도", "조례"]):
+            mode = "E"
+        if any(k in t for k in ["보고", "브리핑", "감사", "상급자"]):
+            mode = "C"
+        if any(k in t for k in ["계고", "처분", "통지", "반려", "요구", "명령"]):
+            mode = "B"
+        risk = "LOW"
+        if any(k in t for k in ["반발", "이의", "분쟁", "재민원", "민감"]):
+            risk = "MEDIUM"
+        if any(k in t for k in ["소송", "감사", "언론", "집단", "고소", "고발"]):
+            risk = "HIGH"
 
-## 5. 민원인 응대 요령
-- (설명 방법)
-- (갈등 해소 방안)
+        fallback_agents = {
+            "A": ["CIVIL", "LEGAL", "INTEGRATOR"],
+            "B": ["ADMIN", "LEGAL", "INTEGRATOR"],
+            "C": ["ADMIN", "INTEGRATOR"],
+            "D": ["PLAN", "ADMIN", "INTEGRATOR"],
+            "E": ["PLAN", "LEGAL", "ADMIN", "INTEGRATOR"],
+        }.get(mode, ["LEGAL", "INTEGRATOR"])
 
-서론(인사말) 없이 바로 시작.
+        if risk == "MEDIUM" and "CIVIL" not in fallback_agents:
+            fallback_agents.append("CIVIL")
+        if risk == "HIGH":
+            for x in ["ADMIN", "LEGAL", "CIVIL", "BEHAVIOR", "PLAN"]:
+                if x not in fallback_agents:
+                    fallback_agents.append(x)
+            if "INTEGRATOR" not in fallback_agents:
+                fallback_agents.append("INTEGRATOR")
+
+        fallback = {
+            "mode": mode,
+            "risk_level": risk,
+            "agents": fallback_agents,
+            "followup_questions": (case_card.get("questions") or [])[:5],
+            "legal_query_seed": " ".join((case_card.get("keywords") or [])[:6]).strip(),
+        }
+        return _json_or_fallback(prompt, schema, fallback)
+
+    @staticmethod
+    def _expand_sub_regs(law_name: str) -> List[str]:
+        name = (law_name or "").strip()
+        if not name:
+            return []
+        # 이미 시행령/규칙이면 중복 확장 금지
+        if any(k in name for k in ["시행령", "시행규칙"]):
+            return []
+        return [f"{name} 시행령", f"{name} 시행규칙"]
+
+    @staticmethod
+    def plan_legal(case_card: dict, route: dict) -> dict:
+        schema = AgentPrompts.legal_plan_schema()
+        prompt = f"""
+너는 대한민국 행정법·실무 절차에 정통한 '법령 설계관'이다.
+사건카드/라우팅을 바탕으로 **업무처리 흐름(단계)별로** 필요한 법령/하위법령/행정규칙(훈령·예규·고시·지침)을 설계하라.
+
+중요:
+- 법령은 가능하면 "법률(본법) + 시행령 + 시행규칙"까지 고려하라.
+- 행정규칙(훈령/예규/고시/지침/요령/기준)은 국가법령정보센터의 "admrul"로 존재할 수 있는 것만 후보로 제시하라.
+- workflow_steps는 3~7개.
+- top_laws는 최대 4개, top_admrul은 최대 3개.
+- 모르는 건 추정하지 말고 "확인 필요" 근거로 why에 적어라.
+
+[라우팅]
+{json.dumps(route, ensure_ascii=False)}
+
+[사건카드]
+{json.dumps(case_card, ensure_ascii=False)}
+
+반드시 JSON만 출력.
+"""
+        fallback = {
+            "workflow_steps": [
+                {
+                    "step": "1) 사실관계/증빙 확인",
+                    "purpose": "민원 요지 및 쟁점 확정",
+                    "must_check": ["증빙 확보", "관할/권한 확인"],
+                    "legal_sources": [
+                        {"name": "행정절차법", "doc_type": "law", "article_num": 0, "priority": 5, "why": "절차적 정당성 확보"},
+                    ],
+                },
+                {
+                    "step": "2) 법적 요건 판단",
+                    "purpose": "가능/불가/추가조치 판단",
+                    "must_check": ["요건 충족 여부", "처분/통지 필요 여부"],
+                    "legal_sources": [
+                        {"name": "행정절차법", "doc_type": "law", "article_num": 0, "priority": 5, "why": "사전통지/의견제출 등"},
+                    ],
+                },
+                {
+                    "step": "3) 문서화 및 회신/보고",
+                    "purpose": "공문/회신문으로 종결",
+                    "must_check": ["단정 표현 금지", "이의절차 안내"],
+                    "legal_sources": [
+                        {"name": "행정절차법", "doc_type": "law", "article_num": 0, "priority": 4, "why": "통지/송달/기재사항"},
+                    ],
+                },
+            ],
+            "top_laws": [{"name": "행정절차법", "include_subregs": False, "why": "대부분의 행정절차 공통"}],
+            "top_admrul": [],
+        }
+        return _json_or_fallback(prompt, schema, fallback)
+
+    @staticmethod
+    def fetch_legal_materials(legal_plan: dict) -> Tuple[str, List[Dict[str, str]]]:
+        """
+        returns:
+          - markdown string (law field에 그대로 넣을 고급 요약)
+          - raw list: [{"name","doc_type","text","link","why","priority"}]
+        """
+        sources: List[Dict[str, Any]] = []
+        for x in legal_plan.get("top_laws", []) or []:
+            name = (x.get("name") or "").strip()
+            if not name:
+                continue
+            sources.append({"name": name, "doc_type": "law", "article_num": 0, "why": x.get("why", ""), "priority": 5})
+            if x.get("include_subregs"):
+                for sub in MultiAgentSystem._expand_sub_regs(name):
+                    sources.append({"name": sub, "doc_type": "law", "article_num": 0, "why": "하위법령(시행) 확인", "priority": 4})
+
+        for x in legal_plan.get("top_admrul", []) or []:
+            name = (x.get("name") or "").strip()
+            if not name:
+                continue
+            sources.append({"name": name, "doc_type": "admrul", "article_num": 0, "why": x.get("why", ""), "priority": 3})
+
+        # 중복 제거
+        uniq = {}
+        for s in sources:
+            key = (s["doc_type"], s["name"])
+            if key not in uniq:
+                uniq[key] = s
+        sources = list(uniq.values())[:10]  # 과도 호출 방지
+
+        raw: List[Dict[str, str]] = []
+
+        def _fetch_one(s: Dict[str, Any]) -> Dict[str, str]:
+            name = s["name"]
+            doc_type = s["doc_type"]
+            why = s.get("why", "")
+            priority = str(s.get("priority", 3))
+            if doc_type == "admrul":
+                text, link = law_api_service.get_admrul_text(name, return_link=True)
+                return {"name": name, "doc_type": doc_type, "text": text or "", "link": link or "", "why": why, "priority": priority}
+            # law
+            art = s.get("article_num") or None
+            text, link = law_api_service.get_law_text(name, art, return_link=True)
+            return {"name": name, "doc_type": doc_type, "text": text or "", "link": link or "", "why": why, "priority": priority}
+
+        with ThreadPoolExecutor(max_workers=LAW_MAX_WORKERS) as ex:
+            futs = [ex.submit(_fetch_one, s) for s in sources]
+            for f in as_completed(futs):
+                try:
+                    raw.append(f.result())
+                except Exception:
+                    continue
+
+        # 보기 좋은 요약(법령 영역)
+        lines = ["## 📚 적용 근거(법령/하위법령/행정규칙) — 확인 가능한 원문 기반", ""]
+        for r in sorted(raw, key=lambda x: int(x.get("priority", "3")), reverse=True):
+            nm = r.get("name", "")
+            lk = r.get("link", "")
+            why = r.get("why", "")
+            typ = "행정규칙" if r.get("doc_type") == "admrul" else "법령"
+            title = f"**[{nm}]({lk})**" if lk else f"**{nm}**"
+            preview = _strip_html(r.get("text", ""))
+            preview = preview[:700] + ("..." if len(preview) > 700 else "")
+            if "검색 결과 없음" in (r.get("text") or ""):
+                preview = "⚠️ 검색 결과 없음(명칭/키워드 조정 필요)"
+            lines.append(f"- {title}  \n  - 구분: {typ}  \n  - 사용 이유: {why or '-'}  \n  - 원문 요약: {preview}\n")
+        return "\n".join(lines), raw
+
+    @staticmethod
+    def _call_agent(role: str, case_card: dict, route: dict, legal_plan: dict, legal_md: str, news_md: str) -> str:
+        base = AgentPrompts.style_rules()
+        header = f"[ROLE] {role}\n[Mode] {route.get('mode')}({MODE_LABEL.get(route.get('mode'), '-')}) / [Risk] {route.get('risk_level')}({RISK_HINT.get(route.get('risk_level'), '-')})"
+        cc = json.dumps(case_card, ensure_ascii=False)
+        lp = json.dumps(legal_plan, ensure_ascii=False)
+
+        if role == "LEGAL":
+            prompt = f"""{base}
+{header}
+
+너는 LEGAL(법률)이다.
+사건카드와 확보된 근거를 바탕으로, **업무처리 단계별로** "법률-시행령-시행규칙-행정규칙(가능한 경우)"을 매핑해라.
+
+[사건카드]
+{cc}
+
+[업무 흐름 설계(초안)]
+{lp}
+
+[확보된 원문/요약]
+{_compact(legal_md, 3500)}
+
+[출력(마크다운)]
+1) 결론 3줄(가능/불가/추가확인)
+2) **업무 단계별 법적 근거 매핑 표**
+   - 열: 단계 | 적용 근거(법률/시행령/시행규칙/행정규칙) | 요건/체크포인트 | 절차 하자 방지
+3) 절차적 정당성 체크리스트(사전통지/의견제출/송달/기한 등)
+4) 리스크 & 방어논리(감사/소송 관점)
+서론 금지.
+"""
+            return llm_service.generate_text(prompt)
+
+        if role == "ADMIN":
+            prompt = f"""{base}
+{header}
+
+너는 ADMIN(행정)이다.
+법적 근거를 '현실 절차'로 번역해 **단계별 실행 SOP**를 작성하라.
+
+[사건카드]
+{cc}
+
+[확보된 근거]
+{_compact(legal_md, 2800)}
+
+[출력(마크다운)]
+1) 업무처리 흐름(표): 단계 | 담당 | 기한 | 입력(증빙/조회) | 출력(문서/통지) | 협조부서 | 유의사항
+2) 체크리스트(Yes/No)
+3) 문서 패키지(회신/통지/보고/계고 등)
+4) 누락 위험 TOP3 + 예방책
+서론 금지.
+"""
+            return llm_service.generate_text(prompt)
+
+        if role == "CIVIL":
+            prompt = f"""{base}
+{header}
+
+너는 CIVIL(민원)이다.
+민원인의 오해/감정 포인트를 고려해 **재민원 감소형** 회신을 설계하라.
+
+[사건카드]
+{cc}
+
+[법적 근거 요약]
+{_compact(legal_md, 2400)}
+
+[유사사례/뉴스(있으면)]
+{_compact(news_md, 1200)}
+
+[출력(마크다운)]
+1) 민원 요지 3줄(민원인 관점/행정 관점)
+2) 회신문 핵심 문장(바로 복붙 가능한 문장 5개)
+3) FAQ 5개(예상 질문/표준 답변)
+4) 반복/악성 민원 대응 레벨(1~3) + 원칙
+서론 금지.
+"""
+            return llm_service.generate_text(prompt)
+
+        if role == "BEHAVIOR":
+            prompt = f"""{base}
+{header}
+
+너는 BEHAVIOR(행동/갈등)이다.
+반발을 줄이면서도 법적 리스크를 키우지 않는 **현장/통화 스크립트**를 작성하라.
+
+[사건카드]
+{cc}
+
+[출력(마크다운)]
+1) 반발 유형 TOP5 + 대응 문장(그대로 읽기 가능)
+2) 통화/대면 스크립트: 도입-설명-거절-마무리
+3) 금지어/권장어
+4) 기록·증거 남기기 체크리스트
+서론 금지.
+"""
+            return llm_service.generate_text(prompt)
+
+        if role == "PLAN":
+            prompt = f"""{base}
+{header}
+
+너는 PLAN(기획)이다.
+업무를 '템플릿/블록/지표'로 표준화해 조직 자산화하라.
+
+[사건카드]
+{cc}
+
+[출력(마크다운)]
+1) SOP 표준 목차(재사용 가능)
+2) 재사용 블록(입력-처리-출력) 3~5개
+3) 기록 필드(저장할 항목/분류체계)
+4) KPI(처리시간/반려율/재민원율 등)
+5) 개선안(단기/중기/장기 각 3개)
+서론 금지.
+"""
+            return llm_service.generate_text(prompt)
+
+        return ""
+
+    @staticmethod
+    def integrate(case_card: dict, route: dict, legal_plan: dict, legal_md: str, news_md: str, agent_out: dict) -> str:
+        base = AgentPrompts.style_rules()
+        prompt = f"""{base}
+너는 INTEGRATOR(9급) 편집장이다.
+아래 산출물을 충돌 없이 병합해 **최종 SOP(처리방향) 완제품**을 작성하라.
+문서는 “상급자 보고 + 실무 실행 + 민원 대응”이 동시에 가능해야 한다.
+
+[Mode/Risk]
+Mode={route.get('mode')}({MODE_LABEL.get(route.get('mode'), '-')})
+Risk={route.get('risk_level')}({RISK_HINT.get(route.get('risk_level'), '-')})
+
+[사건카드]
+{json.dumps(case_card, ensure_ascii=False)}
+
+[법령 설계(업무 단계)]
+{json.dumps(legal_plan, ensure_ascii=False)}
+
+[확보된 법령/규정(원문 기반 요약)]
+{_compact(legal_md, 3500)}
+
+[유사사례/뉴스]
+{_compact(news_md, 1200)}
+
+[전문가 결과]
+## ADMIN
+{_compact(agent_out.get("ADMIN",""), 2200)}
+
+## LEGAL
+{_compact(agent_out.get("LEGAL",""), 2200)}
+
+## CIVIL
+{_compact(agent_out.get("CIVIL",""), 1800)}
+
+## BEHAVIOR
+{_compact(agent_out.get("BEHAVIOR",""), 1600)}
+
+## PLAN
+{_compact(agent_out.get("PLAN",""), 1600)}
+
+[최종 출력 포맷(마크다운 고정)]
+# 1. 한 줄 결론
+- (가능/불가/추가확인 포함)
+
+# 2. 업무처리 흐름 (단계/기한/담당)
+- 표로 제시
+
+# 3. 단계별 법적 근거 매핑
+- 표로 제시(법률/시행령/시행규칙/행정규칙 포함)
+
+# 4. 실무 체크리스트
+- Yes/No
+
+# 5. 민원 응대 핵심(회신 문장/FAQ)
+- 문장 5개 + FAQ 5개
+
+# 6. 예상 반발 및 대응 스크립트(필요 시)
+- 표 + 스크립트
+
+# 7. 리스크 & 방어 포인트
+- 감사/소송 관점
+
+# 8. 추가 확인 질문(최대 5개)
+- 부족한 사실/증빙 질문
+
+서론(인사말) 금지.
 """
         return llm_service.generate_text(prompt)
 
     @staticmethod
-    def clerk(situation: str, legal_basis: str) -> dict:
-        today = datetime.now(KST)
-        prompt = f"오늘: {today.strftime('%Y-%m-%d')}\n상황: {situation}\n법령: {legal_basis[:500]}\n이행 기간 숫자만. 모르면 15."
-        try:
-            res = (llm_service.generate_text(prompt) or "").strip()
-            m = re.search(r"\d{1,3}", res)
-            days = int(m.group(0)) if m else 15
-            days = max(1, min(days, 180))
-        except Exception:
-            days = 15
-        deadline = today + timedelta(days=days)
-        return {"today_str": today.strftime("%Y. %m. %d."), "deadline_str": deadline.strftime("%Y. %m. %d."),
-                "days_added": days, "doc_num": f"행정-{today.strftime('%Y')}-{int(time.time())%1000:03d}호"}
-
-    @staticmethod
-    def drafter(situation: str, legal_basis: str, meta_info: dict, strategy: str) -> dict:
-        schema = {"type": "object", "properties": {"title": {"type": "string"}, "receiver": {"type": "string"},
-                  "body_paragraphs": {"type": "array", "items": {"type": "string"}}, "department_head": {"type": "string"}},
-                  "required": ["title", "receiver", "body_paragraphs", "department_head"]}
-
+    def draft_document(case_card: dict, legal_md: str, final_sop: str, meta_info: dict) -> dict:
+        schema = AgentPrompts.doc_schema()
         prompt = f"""
-당신은 행정기관 베테랑 서기입니다.
+너는 행정기관 베테랑 서기다. 아래 최종 SOP를 기반으로 실제 공문 JSON을 작성하라.
+- 문장: 공문체, 간결, 단정표현 지양(확인 필요는 표시)
+- 법적 근거는 최소 1개 이상 명시(가능하면 조문/근거명 포함)
+- 개인정보는 마스킹
 
-[민원 상황]: {situation}
-[법적 근거]: {legal_basis[:2000]}
-[시행일]: {meta_info.get('today_str','')} / [기한]: {meta_info.get('deadline_str','')}
-[전략]: {strategy[:1000]}
+[사건카드]
+{json.dumps(case_card, ensure_ascii=False)}
 
-공문서 JSON 출력:
-- title: 공문 제목
-- receiver: 수신자
-- body_paragraphs: [경위, 법적근거, 처분내용, 이의제기]
-- department_head: 결재자
+[법령 요약]
+{_compact(legal_md, 2000)}
 
-행정 공문체 사용. 법 조항 인용 필수.
+[최종 SOP]
+{_compact(final_sop, 2200)}
+
+[시행일/기한]
+- 시행일: {meta_info.get('today_str','')}
+- 기한: {meta_info.get('deadline_str','')}
+
+[출력] 반드시 JSON만.
+필드:
+- title
+- receiver
+- body_paragraphs (배열)
+- department_head
 """
         doc = llm_service.generate_json(prompt, schema=schema)
-
         if not isinstance(doc, dict):
-            return {"title": "행정처분 안내", "receiver": "민원인 귀하",
-                    "body_paragraphs": ["1. 경위", "2. 법적 근거", "3. 처분 내용", "4. 이의제기"],
-                    "department_head": "행정기관장"}
-
+            return {
+                "title": "민원 처리 결과 안내",
+                "receiver": "민원인 귀하",
+                "body_paragraphs": ["1. 경위", "2. 관련 법령", "3. 검토 결과", "4. 안내 사항"],
+                "department_head": "행정기관장",
+            }
         bp = doc.get("body_paragraphs")
         doc["body_paragraphs"] = [bp] if isinstance(bp, str) else (bp if isinstance(bp, list) else [])
         for k in ["title", "receiver", "department_head"]:
             if not isinstance(doc.get(k), str):
                 doc[k] = ""
         return doc
+
 
 
 # ==========================================
@@ -1327,40 +1765,98 @@ def run_workflow(user_input: str) -> dict:
 
     t0 = time.perf_counter()
 
-    add_log("🔍 Phase 1: 법령 리서치...", "legal")
+    # Phase 0) 사건카드 + 라우팅
+    add_log("🧩 Phase 0: 사건카드 구조화 및 라우팅...", "sys")
     t = time.perf_counter()
-    legal_basis = LegalAgents.researcher(user_input)
-    timings["law_sec"] = round(time.perf_counter() - t, 2)
-    add_log(f"📜 법적 근거 완료 ({timings['law_sec']}s)", "legal")
+    case_card = MultiAgentSystem.extract_case_card(user_input)
+    route = MultiAgentSystem.route(case_card)
+    timings["route_sec"] = round(time.perf_counter() - t, 2)
+    add_log(f"✅ 라우팅 완료: Mode={route.get('mode')} / Risk={route.get('risk_level')} ({timings['route_sec']}s)", "sys")
 
-    add_log("🟩 뉴스 검색...", "search")
+    # Phase 1) 법령 설계 + 원문 확보(법률/시행령/시행규칙/행정규칙)
+    add_log("📜 Phase 1: 법령/규정 설계 및 원문 확보...", "legal")
+    t = time.perf_counter()
+    legal_plan = MultiAgentSystem.plan_legal(case_card, route)
+    legal_md, legal_raw = MultiAgentSystem.fetch_legal_materials(legal_plan)
+    timings["law_sec"] = round(time.perf_counter() - t, 2)
+    add_log(f"✅ 법령/규정 확보 완료 ({timings['law_sec']}s)", "legal")
+
+    # Phase 1.5) 뉴스(옵션)
+    add_log("📰 Phase 1.5: 유사 사례/뉴스 검색...", "search")
     t = time.perf_counter()
     try:
-        search_results = search_service.search_precedents(user_input)
+        seed = (route.get("legal_query_seed") or "").strip()
+        seed = seed if seed else (case_card.get("task_type") or user_input[:20])
+        search_results = search_service.search_news(seed, top_k=3)
     except Exception:
         search_results = "검색 모듈 미연결"
     timings["news_sec"] = round(time.perf_counter() - t, 2)
+    add_log(f"✅ 뉴스 검색 완료 ({timings['news_sec']}s)", "search")
 
-    add_log(f"🧠 Phase 2: 처리 방향 수립... ({timings['news_sec']}s)", "strat")
+    # Phase 2) 멀티 에이전트 실행(최소 조합)
+    add_log("🧠 Phase 2: 전문가 에이전트 협업...", "strat")
     t = time.perf_counter()
-    strategy = LegalAgents.strategist(user_input, legal_basis, search_results)
-    timings["strat_sec"] = round(time.perf_counter() - t, 2)
 
-    add_log("📅 Phase 3: 기한 산정...", "calc")
+    agents = route.get("agents") or []
+    # INTEGRATOR는 통합 단계에서 호출하므로 여기서는 제외
+    run_roles = [a for a in agents if a in ["ADMIN", "LEGAL", "CIVIL", "BEHAVIOR", "PLAN"]]
+
+    agent_out: Dict[str, str] = {}
+
+    def _run(role: str) -> Tuple[str, str]:
+        out = MultiAgentSystem._call_agent(role, case_card, route, legal_plan, legal_md, search_results)
+        return role, out
+
+    if run_roles:
+        with ThreadPoolExecutor(max_workers=min(4, len(run_roles))) as ex:
+            futs = [ex.submit(_run, r) for r in run_roles]
+            for f in as_completed(futs):
+                try:
+                    k, v = f.result()
+                    agent_out[k] = v
+                except Exception:
+                    continue
+
+    timings["agents_sec"] = round(time.perf_counter() - t, 2)
+    add_log(f"✅ 에이전트 결과 수집 완료 ({timings['agents_sec']}s)", "strat")
+
+    # Phase 3) INTEGRATOR(최종 SOP)
+    add_log("🧭 Phase 3: 최종 SOP(처리방향) 편집...", "strat")
     t = time.perf_counter()
-    meta_info = LegalAgents.clerk(user_input, legal_basis)
+    final_sop = MultiAgentSystem.integrate(case_card, route, legal_plan, legal_md, search_results, agent_out)
+    timings["integrate_sec"] = round(time.perf_counter() - t, 2)
+    add_log(f"✅ SOP 완성 ({timings['integrate_sec']}s)", "strat")
+
+    # Phase 4) 기한 산정 + 공문 생성
+    add_log("📅 Phase 4: 기한 산정...", "calc")
+    t = time.perf_counter()
+    meta_info = LegalAgents.clerk(user_input, legal_md)  # 기존 clerk 재사용
     timings["calc_sec"] = round(time.perf_counter() - t, 2)
 
-    add_log("✍️ Phase 4: 공문서 생성...", "draft")
+    add_log("✍️ Phase 5: 공문서 생성...", "draft")
     t = time.perf_counter()
-    doc_data = LegalAgents.drafter(user_input, legal_basis, meta_info, strategy)
+    doc_data = MultiAgentSystem.draft_document(case_card, legal_md, final_sop, meta_info)
     timings["draft_sec"] = round(time.perf_counter() - t, 2)
 
     timings["total_sec"] = round(time.perf_counter() - t0, 2)
     log_placeholder.empty()
 
-    return {"situation": user_input, "doc": doc_data, "meta": meta_info,
-            "law": legal_basis, "search": search_results, "strategy": strategy, "timings": timings}
+    # 기존 UI/DB 호환: law 필드=법령요약, strategy 필드=최종 SOP
+    return {
+        "situation": user_input,
+        "case_card": case_card,
+        "route": route,
+        "legal_plan": legal_plan,
+        "legal_raw": legal_raw,  # DB에 더 저장하고 싶으면 summary에 포함 가능
+        "doc": doc_data,
+        "meta": meta_info,
+        "law": legal_md,
+        "search": search_results,
+        "strategy": final_sop,
+        "agents": agent_out,
+        "timings": timings,
+    }
+
 
 
 # ==========================================
@@ -1377,7 +1873,10 @@ def build_case_context(res: dict) -> str:
     situation = res.get("situation", "")
     law_txt = _strip_html(res.get("law", ""))[:2000]
     news_txt = _strip_html(res.get("search", ""))[:1000]
-    strategy = res.get("strategy", "")[:1000]
+    strategy = res.get("strategy", "")[:1200]  # SOP라서 조금 더
+    route = res.get("route") or {}
+    case_card = res.get("case_card") or {}
+
     doc = res.get("doc") or {}
     bp = doc.get("body_paragraphs", [])
     if isinstance(bp, str):
@@ -1385,14 +1884,18 @@ def build_case_context(res: dict) -> str:
     body = "\n".join([f"- {p}" for p in bp])
 
     return f"""[케이스 컨텍스트]
+0) 라우팅: Mode={route.get('mode','')} / Risk={route.get('risk_level','')}
+0-1) 사건카드: {json.dumps(case_card, ensure_ascii=False)[:800]}
+
 1) 민원: {situation}
 2) 법령: {law_txt}
 3) 뉴스: {news_txt}
-4) 전략: {strategy}
+4) SOP: {strategy}
 5) 공문: 제목={doc.get('title','')}, 수신={doc.get('receiver','')}
 {body}
 
 [규칙] 컨텍스트 내에서만 답변. 단정 금지. 추가 조회 필요시 명시."""
+
 
 
 def needs_tool_call(user_msg: str) -> dict:
