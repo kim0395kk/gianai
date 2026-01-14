@@ -1,6 +1,5 @@
-streamlit==1.41.1
-google-generativeai
-groq
-requests
-supabase
-xmltodict
+streamlit>=1.32
+requests>=2.31
+groq>=0.9
+supabase>=2.3
+google-auth>=2.29
