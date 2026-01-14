@@ -1494,93 +1494,6 @@ def render_followup_chat(res: dict):
     upd = db_service.update_followup(st.session_state.get("report_id"), res, followup_data)
     if not upd.get("ok"):
         st.caption(f"⚠️ {upd.get('msg')}")
-
-
-# ==========================================
-# 8) Login & Data Management UI
-# ==========================================
-def render_login_box():
-    with st.expander("🔐 로그인 (Supabase Auth)", expanded=not db_service.is_logged_in()):
-        if not db_service.is_active:
-            st.error("Supabase 연결 실패. secrets 확인 필요.")
-            return
-
-        if db_service.is_logged_in():
-            st.success(f"✅ {st.session_state.get('sb_user_email')}")
-            if st.button("로그아웃", use_container_width=True):
-                out = db_service.sign_out()
-                if out.get("ok"):
-                    st.rerun()
-                else:
-                    st.error(out.get("msg"))
-        else:
-            email = st.text_input("이메일", key="login_email")
-            # @korea.kr 도메인 권장 안내
-            if email and not email.lower().endswith(KOREA_DOMAIN):
-                st.warning(f"⚠️ {KOREA_DOMAIN} 도메인 계정 권장")
-            pw = st.text_input("비밀번호", type="password", key="login_pw")
-            if st.button("로그인", type="primary", use_container_width=True):
-                r = db_service.sign_in(email, pw)
-                if r.get("ok"):
-                    st.rerun()
-                else:
-                    st.error(r.get("msg"))
-
-
-def render_data_management_panel():
-    with st.expander("🗂️ 데이터 관리", expanded=False):
-        if not db_service.is_logged_in() and not db_service.service_key:
-            st.info("로그인 후 사용 가능")
-            return
-
-        if db_service.service_key:
-            st.caption("⚠️ 관리자 모드 (SERVICE_ROLE_KEY)")
-
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            keyword = st.text_input("검색", placeholder="키워드")
-        with col2:
-            limit = st.slider("개수", 10, 100, 30, 10)
-
-        rows = db_service.list_reports(limit=limit, keyword=keyword)
-        if not rows:
-            st.caption("결과 없음")
-            return
-
-        options = []
-        id_map = {}
-        for r in rows:
-            rid = r.get("id")
-            created = (r.get("created_at") or "")[:16].replace("T", " ")
-            sit = (r.get("situation") or "").replace("\n", " ")[:40]
-            label = f"{created} | {sit}"
-            options.append(label)
-            id_map[label] = rid
-
-        picked = st.selectbox("선택", options)
-        report_id = id_map.get(picked)
-        detail = db_service.get_report(report_id) if report_id else None
-
-        if not detail:
-            return
-
-        st.json(detail)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.download_button("⬇️ JSON", json.dumps(detail, ensure_ascii=False, indent=2).encode(),
-                               f"report_{report_id}.json", "application/json", use_container_width=True)
-        with c2:
-            if st.button("🗑️ 삭제", use_container_width=True):
-                r = db_service.delete_report(report_id)
-                st.success("삭제됨") if r.get("ok") else st.error(r.get("msg"))
-                if r.get("ok"):
-                    st.rerun()
-
-
-# ==========================================
-# 9) Main UI
-# ==========================================
-def main():
     # 다크모드 상태 초기화
     if "dark_mode" not in st.session_state:
         st.session_state["dark_mode"] = False
@@ -1618,19 +1531,9 @@ def main():
     with top_cols[2]:
         st.caption("⚠️개인정보금지")
 
-    # ===== 사이드바: 로그인 + 히스토리 =====
+    # ===== 사이드바: 로그인 + 히스토리 (ChatGPT 스타일) =====
     with st.sidebar:
-        st.markdown("### 🏢 AI 행정관 Pro")
-        st.caption("Govable AI | kim0395kk@korea.kr")
-        st.markdown("---")
-
-        # 로그인 섹션
-        render_login_box()
-        st.markdown("---")
-
-        # 히스토리 섹션
-        st.markdown("### 📂 히스토리")
-        render_data_management_panel()
+        render_sidebar_ui()
 
     col_left, col_right = st.columns([1, 1.2])
 
@@ -1669,18 +1572,23 @@ def main():
                 with c1:
                     st.markdown("**법령**")
                     law_html = res.get("law", "").replace("\n", "<br>")
+                    # 마크다운 볼드 -> HTML strong
+                    law_html = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', law_html)
                     law_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
                         r'<a href="\2" target="_blank">\1</a>', law_html)
                     st.markdown(f"<div style='height:280px;overflow-y:auto;padding:10px;background:#f8fafc;border-radius:6px;font-size:0.9rem'>{law_html}</div>", unsafe_allow_html=True)
                 with c2:
                     st.markdown("**뉴스**")
                     news_html = res.get("search", "").replace("\n", "<br>")
+                    news_html = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', news_html)
                     news_html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
                         r'<a href="\2" target="_blank">\1</a>', news_html)
                     st.markdown(f"<div style='height:280px;overflow-y:auto;padding:10px;background:#eff6ff;border-radius:6px;font-size:0.9rem'>{news_html}</div>", unsafe_allow_html=True)
 
             with st.expander("🧭 처리 방향", expanded=True):
-                st.markdown(res.get("strategy", ""))
+                # 마크다운 렌더링 지원
+                strategy_text = res.get("strategy", "")
+                st.markdown(strategy_text)
 
     with col_right:
         if "workflow_result" in st.session_state:
