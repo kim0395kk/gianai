@@ -703,7 +703,7 @@ class LLMService:
 
         # 모델은 존재/권한 이슈가 잦으니 "여러개 후보"로 돌림
         self.vertex_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash-001"]
-        self.groq_models = ["llama-3.3-70b-versatile", "llama3-70b-8192"]
+        self.groq_models = ["llama-3.1-70b-versatile", "llama3-70b-8192", "mixtral-8x7b-32768"]
 
         self.creds = None
         sa_raw = v.get("SERVICE_ACCOUNT_JSON")
@@ -755,21 +755,29 @@ class LLMService:
         }
         headers = {"Authorization": f"Bearer {self.creds.token}", "Content-Type": "application/json"}
 
-        r = http_post(url, json_body=payload, headers=headers, timeout=VERTEX_TIMEOUT, retries=1)
-        data = r.json()
-
-        if isinstance(data, dict) and data.get("error"):
-            raise RuntimeError(data["error"].get("message", "Vertex error"))
-
         try:
-            return data["candidates"][0]["content"]["parts"][0].get("text", "") or ""
-        except Exception:
-            return ""
+            r = http_post(url, json_body=payload, headers=headers, timeout=VERTEX_TIMEOUT, retries=1)
+            data = r.json()
+
+            if isinstance(data, dict) and data.get("error"):
+                error_msg = data["error"].get("message", "Vertex error")
+                raise RuntimeError(f"Vertex AI 오류 ({model_name}): {error_msg}")
+
+            try:
+                return data["candidates"][0]["content"]["parts"][0].get("text", "") or ""
+            except (KeyError, IndexError, TypeError) as e:
+                raise RuntimeError(f"Vertex AI 응답 파싱 실패 ({model_name}): {e}")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Vertex AI 연결 실패 ({model_name}): {e}")
 
     def _generate_groq(self, prompt: str) -> str:
         """Groq 텍스트 생성(백업)"""
         if not self.groq_client:
-            return ""
+            raise RuntimeError("Groq 클라이언트 미설정 (GROQ_API_KEY 확인 필요)")
+        
+        last_error = None
         for model in self.groq_models:
             try:
                 completion = self.groq_client.chat.completions.create(
@@ -783,9 +791,13 @@ class LLMService:
                 txt = (txt or "").strip()
                 if txt:
                     return txt
-            except Exception:
+            except Exception as e:
+                last_error = f"Groq 모델 {model} 실패: {e}"
                 continue
-        return ""
+        
+        if last_error:
+            raise RuntimeError(f"모든 Groq 모델 실패. 마지막 오류: {last_error}")
+        raise RuntimeError("Groq 응답 없음")
 
     def generate_text(self, prompt: str) -> str:
         """일반 텍스트 생성: Vertex 우선 → Groq 백업"""
@@ -793,6 +805,7 @@ class LLMService:
         if not prompt:
             return ""
 
+        vertex_errors = []
         # Vertex 우선
         if self.creds and self.project_id and self.location and GoogleAuthRequest:
             for m in self.vertex_models:
@@ -800,11 +813,19 @@ class LLMService:
                     txt = (self._vertex_generate(prompt, m) or "").strip()
                     if txt:
                         return txt
-                except Exception:
+                except Exception as e:
+                    vertex_errors.append(f"{m}: {str(e)}")
                     continue
 
         # Groq 백업
-        return self._generate_groq(prompt)
+        try:
+            return self._generate_groq(prompt)
+        except Exception as groq_err:
+            error_msg = f"LLM 연결 실패\n"
+            if vertex_errors:
+                error_msg += f"Vertex AI 오류:\n" + "\n".join(vertex_errors) + "\n"
+            error_msg += f"Groq 오류: {groq_err}"
+            raise RuntimeError(error_msg)
 
     def generate_json(self, prompt: str, schema: Optional[dict] = None) -> Any:
         """
@@ -852,19 +873,14 @@ class LLMService:
 
         for attempt in range(2):
             suffix = "\n\n반드시 JSON만 출력." if attempt == 0 else "\n\n순수 JSON 외의 문자 금지."
-            txt = self.generate_text(prompt + suffix)
-            j = _try_parse(txt)
-            if j is not None:
-                return j
-
-        return None
-
-        for attempt in range(2):
-            suffix = "\n\n반드시 JSON만 출력." if attempt == 0 else "\n\n순수 JSON 외의 문자 금지."
-            txt = self.generate_text(prompt + suffix)
-            j = _try_parse(txt)
-            if j is not None:
-                return j
+            try:
+                txt = self.generate_text(prompt + suffix)
+                j = _try_parse(txt)
+                if j is not None:
+                    return j
+            except Exception as e:
+                if attempt == 1:  # 마지막 시도에서만 에러 전파
+                    raise RuntimeError(f"JSON 생성 실패: {e}")
 
         return None
 
@@ -1795,7 +1811,10 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 4) 리스크 & 방어논리(감사/소송 관점)
 서론 금지.
 """
-            return llm_service.generate_text(prompt)
+            try:
+                return llm_service.generate_text(prompt)
+            except Exception as e:
+                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
 
         if role == "ADMIN":
             prompt = f"""{base}
@@ -1817,7 +1836,10 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 4) 누락 위험 TOP3 + 예방책
 서론 금지.
 """
-            return llm_service.generate_text(prompt)
+            try:
+                return llm_service.generate_text(prompt)
+            except Exception as e:
+                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
 
         if role == "CIVIL":
             prompt = f"""{base}
@@ -1842,7 +1864,10 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 4) 반복/악성 민원 대응 레벨(1~3) + 원칙
 서론 금지.
 """
-            return llm_service.generate_text(prompt)
+            try:
+                return llm_service.generate_text(prompt)
+            except Exception as e:
+                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
 
         if role == "BEHAVIOR":
             prompt = f"""{base}
@@ -1861,7 +1886,10 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 4) 기록·증거 남기기 체크리스트
 서론 금지.
 """
-            return llm_service.generate_text(prompt)
+            try:
+                return llm_service.generate_text(prompt)
+            except Exception as e:
+                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
 
         if role == "PLAN":
             prompt = f"""{base}
@@ -1881,7 +1909,10 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
 5) 개선안(단기/중기/장기 각 3개)
 서론 금지.
 """
-            return llm_service.generate_text(prompt)
+            try:
+                return llm_service.generate_text(prompt)
+            except Exception as e:
+                return f"⚠️ LLM 연결 실패 ({role}): {str(e)}"
 
         return ""
 
@@ -1952,7 +1983,10 @@ Risk={route.get('risk_level')}({RISK_HINT.get(route.get('risk_level'), '-')})
 
 서론(인사말) 금지.
 """
-        return llm_service.generate_text(prompt)
+        try:
+            return llm_service.generate_text(prompt)
+        except Exception as e:
+            return f"⚠️ LLM 연결 실패 (INTEGRATOR): {str(e)}\n\n에이전트 결과를 기반으로 수동 통합이 필요합니다."
 
     @staticmethod
     def draft_document(case_card: dict, legal_md: str, final_sop: str, meta_info: dict) -> dict:
@@ -1983,7 +2017,11 @@ Risk={route.get('risk_level')}({RISK_HINT.get(route.get('risk_level'), '-')})
 - body_paragraphs (배열)
 - department_head
 """
-        doc = llm_service.generate_json(prompt, schema=schema)
+        try:
+            doc = llm_service.generate_json(prompt, schema=schema)
+        except Exception as e:
+            st.error(f"공문 생성 중 LLM 연결 실패: {e}")
+            doc = None
         if not isinstance(doc, dict):
             return {
                 "title": "민원 처리 결과 안내",
@@ -2171,7 +2209,11 @@ def plan_tool_calls_llm(user_msg: str, situation: str, known_law: str) -> dict:
 [확보 법령] {known_law[:1500]}
 [질문] {user_msg}
 추가 조회 필요시 JSON 출력. need_law/law_name/article_num/need_news/news_query"""
-    plan = llm_service.generate_json(prompt, schema=schema) or {}
+    try:
+        plan = llm_service.generate_json(prompt, schema=schema) or {}
+    except Exception as e:
+        # LLM 실패 시 기본값 반환
+        plan = {}
     if not isinstance(plan, dict):
         return {"need_law": False, "law_name": "", "article_num": 0, "need_news": False, "news_query": ""}
     try:
@@ -2189,7 +2231,10 @@ def answer_followup(case_ctx: str, extra_ctx: str, history: list, user_msg: str)
 [히스토리] {hist_txt}
 [질문] {user_msg}
 케이스 고정 답변. 서론 금지."""
-    return llm_service.generate_text(prompt)
+    try:
+        return llm_service.generate_text(prompt)
+    except Exception as e:
+        return f"⚠️ LLM 연결 실패: {str(e)}\n\n질문에 대한 답변을 생성할 수 없습니다. LLM 서비스 설정을 확인해주세요."
 
 
 def render_followup_chat(res: dict):
@@ -2505,6 +2550,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
