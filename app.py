@@ -2048,7 +2048,7 @@ def run_workflow(user_input: str) -> dict:
         "strategy": final_sop,
         "agents": agent_out,
         "timings": timings,
-
+    }
     timings["total_sec"] = round(time.perf_counter() - t0, 2)
     log_placeholder.empty()
 
