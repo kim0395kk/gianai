@@ -1121,8 +1121,10 @@ class LawOfficialService:
 # ==========================================
 # 4) Global Instances
 # ==========================================
+_SERVICE_VERSION = "v4_full_api"  # 캐시 무효화 - 모든 메서드 포함된 새 인스턴스 생성
+
 @st.cache_resource(show_spinner=False)
-def _get_services():
+def _get_services(_version: str = _SERVICE_VERSION):
     return LLMService(), SearchService(), DatabaseService(), LawOfficialService()
 
 llm_service, search_service, db_service, law_api_service = _get_services()
@@ -1208,15 +1210,47 @@ class LegalAgents:
 
     @staticmethod
     def strategist(situation: str, legal_basis: str, search_results: str) -> str:
-        prompt = f"""당신은 행정 업무 베테랑 '주무관'입니다.
-[민원]: {situation}
-[법적 근거]: {legal_basis[:2000]}
-[유사 사례]: {search_results[:1000]}
+        prompt = f"""
+당신은 20년 경력의 행정 업무 베테랑 '주무관'입니다.
 
-처리 방향(Strategy)을 수립하세요. 서론 금지.
-1. 처리 방향
-2. 핵심 주의사항
-3. 예상 반발 및 대응"""
+[민원 상황]
+{situation}
+
+[확보된 법적 근거]
+{legal_basis[:3000]}
+
+[유사 사례/뉴스]
+{search_results[:1500]}
+
+위 정보를 종합하여 **실무적이고 구체적인** 민원 처리 방향을 수립하세요.
+
+[응답 형식 - 아래 구조를 반드시 따르세요]
+
+## 1. 처리 방향 (Action Plan)
+- 1단계: (구체적 조치)
+- 2단계: (구체적 조치)
+- 3단계: (구체적 조치)
+
+## 2. 법적 근거 요약
+- 적용 법령: (법령명 + 조문)
+- 핵심 요지: (왜 이 법이 적용되는지)
+
+## 3. 핵심 주의사항 (⚠️)
+- (실무에서 놓치기 쉬운 포인트)
+- (법적 리스크가 있는 부분)
+
+## 4. 예상 반발 및 대응
+| 예상 반발 | 대응 논리 |
+|----------|-----------|
+| (반발1) | (대응1) |
+| (반발2) | (대응2) |
+
+## 5. 추가 권고사항
+- (업무 효율화 팁)
+- (유사 민원 방지책)
+
+⚠️ 서론(인사말/공감 표현) 절대 금지. 바로 내용 시작.
+"""
         return llm_service.generate_text(prompt)
 
     @staticmethod
@@ -1531,30 +1565,60 @@ def render_data_management_panel():
 # 9) Main UI
 # ==========================================
 def main():
-    with st.sidebar:
-        st.markdown("### ✅ 시스템 상태")
+    # 다크모드 상태 초기화
+    if "dark_mode" not in st.session_state:
+        st.session_state["dark_mode"] = False
+
+    # 다크모드 CSS 적용
+    if st.session_state["dark_mode"]:
+        st.markdown("""<style>
+        .stApp { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f0f23 100%) !important; }
+        .stApp::before { background: radial-gradient(circle at 20% 50%, rgba(102, 126, 234, 0.2), transparent 50%),
+            radial-gradient(circle at 80% 80%, rgba(168, 85, 247, 0.2), transparent 50%) !important; }
+        [data-testid="stSidebar"] { background: linear-gradient(180deg, rgba(26, 26, 46, 0.98) 0%, rgba(22, 33, 62, 0.95) 100%) !important; }
+        [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3, 
+        [data-testid="stSidebar"] p, [data-testid="stSidebar"] label { color: #e2e8f0 !important; -webkit-text-fill-color: #e2e8f0 !important; }
+        .paper-sheet { background: linear-gradient(135deg, rgba(26, 26, 46, 0.95), rgba(22, 33, 62, 0.92)) !important; color: #e2e8f0 !important; }
+        .doc-body, .doc-info { color: #cbd5e1 !important; }
+        h1, h2, h3, p, label { color: #e2e8f0 !important; }
+        </style>""", unsafe_allow_html=True)
+
+    # ===== 상단 시스템 상태 + 다크모드 토글 =====
+    top_cols = st.columns([6, 1, 1])
+    with top_cols[0]:
         g = _safe_secrets("general")
         v = _safe_secrets("vertex")
         s = _safe_secrets("supabase")
+        status_items = []
+        status_items.append("✅법령" if g.get("LAW_API_ID") else "❌법령")
+        status_items.append("✅뉴스" if (g.get("NAVER_CLIENT_ID") and g.get("NAVER_CLIENT_SECRET")) else "❌뉴스")
+        status_items.append("✅AI" if v.get("SERVICE_ACCOUNT_JSON") else "❌AI")
+        status_items.append("✅DB" if (s.get("SUPABASE_URL") and (s.get("SUPABASE_ANON_KEY") or s.get("SUPABASE_KEY"))) else "❌DB")
+        st.caption(" | ".join(status_items) + (" | ⚠️관리자" if db_service.service_key else ""))
+    with top_cols[1]:
+        if st.button("🌙" if not st.session_state["dark_mode"] else "☀️", help="다크모드 토글"):
+            st.session_state["dark_mode"] = not st.session_state["dark_mode"]
+            st.rerun()
+    with top_cols[2]:
+        st.caption("⚠️개인정보금지")
 
-        st.write("법령 API:", "✅" if g.get("LAW_API_ID") else "❌")
-        st.write("네이버 API:", "✅" if (g.get("NAVER_CLIENT_ID") and g.get("NAVER_CLIENT_SECRET")) else "❌")
-        st.write("Vertex AI:", "✅" if v.get("SERVICE_ACCOUNT_JSON") else "❌")
-        st.write("Supabase:", "✅" if (s.get("SUPABASE_URL") and (s.get("SUPABASE_ANON_KEY") or s.get("SUPABASE_KEY"))) else "❌")
-        if db_service.service_key:
-            st.caption("⚠️ 관리자 모드")
-        st.caption("⚠️ 개인정보(성명/연락처/주소) 입력 금지")
+    # ===== 사이드바: 로그인 + 히스토리 =====
+    with st.sidebar:
+        st.markdown("### 🏢 AI 행정관 Pro")
+        st.caption("Govable AI | kim0395kk@korea.kr")
+        st.markdown("---")
+
+        # 로그인 섹션
+        render_login_box()
+        st.markdown("---")
+
+        # 히스토리 섹션
+        st.markdown("### 📂 히스토리")
+        render_data_management_panel()
 
     col_left, col_right = st.columns([1, 1.2])
 
     with col_left:
-        render_login_box()
-        render_data_management_panel()
-
-        st.title("🏢 AI 행정관 Pro")
-        st.caption("문의: kim0395kk@korea.kr | Govable AI")
-        st.markdown("---")
-
         st.markdown("### 🗣️ 업무 지시")
         user_input = st.text_area("업무 내용", height=140, label_visibility="collapsed",
             placeholder="예시\n- 상황: (무슨 일 / 어디 / 언제)\n- 의도: (확인 쟁점)\n- 요청: (공문 종류)")
