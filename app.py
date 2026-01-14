@@ -1456,6 +1456,43 @@ ADMIN, LEGAL, CIVIL, BEHAVIOR, PLAN, INTEGRATOR
         sources: List[Dict[str, Any]] = []
         for x in legal_plan.get("top_laws", []) or []:
             name = (x.get("name") or "").strip()
+                    if isinstance(legal_plan, str):
+            try:
+                legal_plan = json.loads(legal_plan)
+            except Exception:
+                legal_plan = {}
+
+        def _norm_list(v):
+            if v is None:
+                return []
+            if isinstance(v, list):
+                return v
+            return [v]
+
+        def _norm_top_laws(items):
+            out = []
+            for x in _norm_list(items):
+                if isinstance(x, str):
+                    out.append({"name": x, "include_subregs": True, "why": "LLM 문자열 출력 정규화"})
+                elif isinstance(x, dict):
+                    out.append({
+                        "name": x.get("name") or x.get("law_name") or "",
+                        "include_subregs": bool(x.get("include_subregs", False)),
+                        "why": x.get("why", "")
+                    })
+            return [o for o in out if (o.get("name") or "").strip()]
+
+        def _norm_top_admrul(items):
+            out = []
+            for x in _norm_list(items):
+                if isinstance(x, str):
+                    out.append({"name": x, "why": "LLM 문자열 출력 정규화"})
+                elif isinstance(x, dict):
+                    out.append({"name": x.get("name") or x.get("admrul_name") or "", "why": x.get("why", "")})
+            return [o for o in out if (o.get("name") or "").strip()]
+
+        legal_plan["top_laws"] = _norm_top_laws(legal_plan.get("top_laws"))
+        legal_plan["top_admrul"] = _norm_top_admrul(legal_plan.get("top_admrul"))
             if not name:
                 continue
             sources.append({"name": name, "doc_type": "law", "article_num": 0, "why": x.get("why", ""), "priority": 5})
@@ -1770,6 +1807,15 @@ def run_workflow(user_input: str) -> dict:
     t = time.perf_counter()
     case_card = MultiAgentSystem.extract_case_card(user_input)
     route = MultiAgentSystem.route(case_card)
+        if route.get("risk_level") not in ["LOW", "MEDIUM", "HIGH"]:
+        route["risk_level"] = "LOW"
+    if route.get("mode") not in ["A", "B", "C", "D", "E"]:
+        route["mode"] = "A"
+    if not isinstance(route.get("agents"), list):
+        route["agents"] = ["LEGAL", "INTEGRATOR"]
+    if "INTEGRATOR" not in route["agents"]:
+        route["agents"].append("INTEGRATOR")
+
     timings["route_sec"] = round(time.perf_counter() - t, 2)
     add_log(f"✅ 라우팅 완료: Mode={route.get('mode')} / Risk={route.get('risk_level')} ({timings['route_sec']}s)", "sys")
 
