@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 # Govable AI Bureau - Stabilized Version
 # Last updated: 2026-01-14
-
+import streamlit as st
+st.write(f"현재 스트림릿 버전: {st.__version__}")
 import json
 import re
 import time
